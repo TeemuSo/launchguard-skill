@@ -102,7 +102,7 @@ Ask the user for their deployed URL. Or look in their project (`.env.local`, `ve
 ```bash
 curl -s -X POST https://www.launchguard.dev/api/scan \
   -H "Content-Type: application/json" \
-  -d '{"url": "TARGET_URL"}'
+  -d '{"url": "TARGET_URL", "client": "claude-code-skill"}'
 ```
 
 Response: `{"scanId": "uuid", "streamUrl": "https://..."}`
