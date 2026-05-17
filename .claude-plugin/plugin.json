@@ -1,0 +1,13 @@
+{
+  "name": "launchguard",
+  "version": "1.0.0",
+  "description": "External security scanner for live web apps. Finds exposed APIs, broken Supabase/Firebase rules, leaked secrets, and cost-sinkhole endpoints — from the outside, like an attacker would.",
+  "author": {
+    "name": "LaunchGuard",
+    "url": "https://launchguard.dev"
+  },
+  "homepage": "https://launchguard.dev",
+  "repository": "https://github.com/TeemuSo/launchguard-skill",
+  "license": "MIT",
+  "keywords": ["security", "scanner", "DAST", "supabase", "firebase", "api-security", "vibe-coding"]
+}
