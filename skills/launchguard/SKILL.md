@@ -439,7 +439,7 @@ Two Supabase read styles, pick by the question: to prove **"a logged-in user can
 - **`fixedStatusIn` is required** (e.g. `[401,403,429]`). The engine throws at run time without it (`fixedStatusIn is not iterable`), turning a valid chain into a false `inconclusive`. Both templates above include it; never drop it.
 - **`title` must be unique among your ACTIVE chains.** Re-ingesting with a title that an active chain already uses fails (`500`), so get the spec right before you ingest and give each chain a fresh, descriptive title. A bad chain is no longer permanent, though: you can `DELETE /api/v1/chains/<id>` to archive it, which removes it from the list, stops it auto-running, and frees its title to re-ingest cleanly.
 - **A 404 is never `fixed`.** Only a status you list in `fixedStatusIn` (or a proven-empty result) counts as patched, and `404` is never allowed in that set, so a deleted endpoint never reads as a false fix. `[401,403,429]` is the common deny set, but any genuine deny status works: include `400` too when the patched app rejects the exploit input that way (e.g. a rejected OTP returns `400`).
-- **Side-effect is re-derived from the HTTP method, and any non-GET is "mutation".** The rule is method-based, not word-based: a `GET`/`HEAD` (and a Supabase `/rest/v1/` GET) is `read_only`; **any `POST`/`PUT`/`PATCH`/`DELETE` is `mutation`**, regardless of how safe the path looks. A `mutation` chain is stored **manual-only**: it will NOT auto-run on deploy, and `POST /api/v1/chains/<id>/run` returns **409** (not a verdict). This is a deliberate safety gate, so LaunchGuard never auto-fires writes, charges, or OTP requests against the app. It is expected behavior, not a broken test. See "Managing mutation (manual-only) tests" below.
+- **Side-effect is re-derived from the HTTP method, and any non-GET is "mutation".** The rule is method-based, not word-based: a `GET`/`HEAD` (and a Supabase `/rest/v1/` GET) is `read_only`; **any `POST`/`PUT`/`PATCH`/`DELETE` is `mutation`**, regardless of how safe the path looks. A `mutation` chain never auto-runs on deploy. `POST /api/v1/chains/<id>/run` on it returns **409** ONLY when you have not confirmed (`{ "error": "...", "sideEffect": "mutation", "needsConfirmation": true }`); with body `{ "confirmMutation": true }` (and a verified domain) it actually runs and returns the normal verdict, firing real writes, charges, or OTP exactly once. The auto-run gate stays in place so LaunchGuard never fires a write on its own; only an explicit confirmed `/run` does. See "Running mutation tests (explicit confirmation)" below.
 - **JSONPath is a custom subset** (`$.a.b`, `$[0]`, `$[*].x`, `$[?(@.x != "y")]`). No recursive `..`, no slices, only `==` / `!=`. See `chains-reference.md`.
 
 ### Step 4: submit and run
@@ -465,18 +465,27 @@ Report the verdict plainly:
 
 ### Managing the test suite via the API
 
-Your `lg_` key lets you fully organize a domain's suite without a human:
+Your `lg_` key gives you the FULL custom-test lifecycle on a domain's suite without a human:
+- **Create:** ingest a new chain with `POST /api/v1/chains`.
 - **List / inspect:** `GET /api/v1/chains?targetHost=<host>` then `GET /api/v1/chains/<id>` for any blueprint.
 - **De-duplicate:** compare each `exploit` `{method,path,target}` key; archive duplicates.
+- **Modify in place:** `PATCH /api/v1/chains/<id>` with `{ title?, severity?, spec? }` (at least one). Changing the `spec` re-validates it and re-derives the side-effect, so flipping a method to a non-GET can turn the chain into a mutation. Use this to fix or evolve a test instead of archive-then-reingest.
+- **Run any chain:** `POST /api/v1/chains/<id>/run`. Read-only chains run freely and return a verdict. A mutation chain runs only with body `{ "confirmMutation": true }` against a verified domain (it fires real side effects); see "Running mutation tests (explicit confirmation)" below.
 - **Archive:** `DELETE /api/v1/chains/<id>` for a duplicate, broken, or obsolete test (`200 {"ok":true,"archived":true}`). The same call works whether you authored it or not, as long as it is your account's.
-- **Validate read-only tests:** `POST /api/v1/chains/<id>/run` and read the verdict.
-- **Author / re-author:** ingest a corrected version after archiving the broken one.
 
-### Managing mutation (manual-only) tests
+### Running mutation tests (explicit confirmation)
 
-A `mutation` chain (any non-GET exploit, e.g. a `POST /verify-otp` takeover or a `POST /topup` charge) is real, valuable coverage, but you **cannot run it with your API key** by design. `POST /chains/<id>/run` will return `409` every time. These are validated by a **human from the LaunchGuard dashboard**, which runs them under per-step approval so a write only fires with explicit human consent. So for a mutation test you can still author it, list it, dedupe it, and archive it via the API; you just **cannot produce a verdict for it yourself**. You MAY send one `/run` to a mutation chain to confirm it is gated (you will get the `409`), but that `409` is not a verdict: do not record it as pass or fail, just note the test is manual-only. When you report on the suite, mark mutation tests as "manual-only, validate from the dashboard" rather than calling them broken, and do NOT archive one just because `/run` returns 409 (that 409 is the safety gate, not a defect). Only archive a mutation test if it is a true duplicate or genuinely obsolete.
+A `mutation` chain (any non-GET exploit, e.g. a `POST /verify-otp` takeover or a `POST /topup` charge) is real, valuable coverage, and you CAN now run it with your API key, but only behind an explicit confirmation gate because it fires real side effects (writes, charges, OTP) against the target:
 
-One subtlety: a test can be semantically a read yet still be classified `mutation` because it uses a non-GET method (e.g. a `POST /balance` that only fetches a balance). You generally cannot make it auto-runnable unless the same data is reachable via a real `GET`; if no GET equivalent exists, leave it manual-only. Do not rewrite the method to GET just to dodge the gate, since that would change what the test actually sends.
+- `POST /chains/<id>/run` on a mutation chain WITHOUT confirmation returns `409 { "error": "...", "sideEffect": "mutation", "needsConfirmation": true }`. That 409 is not a verdict; it is the gate asking you to confirm.
+- `POST /chains/<id>/run` with body `{ "confirmMutation": true }` actually runs it and returns the normal verdict. This fires the real side effect against the target exactly once.
+- A mutation run also requires a **VERIFIED** domain. Monitored-but-not-verified is not enough: read-only runs get the monitored trust-the-owner relaxation, mutation runs do not. If ownership is not verified you get a `403` telling you to verify the domain first.
+
+The gate exists because a human running a mutation from the LaunchGuard dashboard gets per-step approval before each write fires. Your equivalent of that consent is the explicit `confirmMutation: true` plus a verified domain plus the user's own instruction. So only fire a mutation run when ALL of these hold: the user explicitly told you to, the domain is one they own AND have verified, and you send the minimum (one run). Never loop or re-fire it. Auto-deploy re-runs never fire mutations; only an explicit confirmed `/run` does.
+
+You can still author, list, dedupe, modify, and archive mutation chains via the API as usual. When you report on the suite, a mutation chain you have not been asked to fire should be marked "mutation, fires real side effects, run only on explicit request" rather than called broken. Do NOT archive one just because an unconfirmed `/run` returned 409 (that 409 is the gate, not a defect). Only archive a mutation test if it is a true duplicate or genuinely obsolete.
+
+One subtlety: a test can be semantically a read yet still be classified `mutation` because it uses a non-GET method (e.g. a `POST /balance` that only fetches a balance). That still means it never auto-runs and a manual `/run` needs `confirmMutation: true`. Do not rewrite the method to GET just to dodge the gate, since that would change what the test actually sends.
 
 ### Boundary
 

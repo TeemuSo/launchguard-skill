@@ -66,7 +66,7 @@ The `reason` string in a `/run` response names which branch fired, so you can re
 - `exploit_absent: total N < M` -> `fixed` (proven empty, e.g. a `content-range` total of 0 or below `minTotalRows`)
 - `engine_error: <message>` -> `inconclusive` (a malformed assertion, e.g. a missing `fixedStatusIn`; fix the spec and re-run)
 
-Note: a `mutation` (manual-only) chain never reaches verdict routing through the API run path at all; `POST /api/v1/chains/:id/run` rejects it with `409` before it executes (see §7.3 and the SKILL.md "Managing mutation tests" note). Such chains are run by a human from the dashboard under per-step approval.
+Note: a `mutation` chain never auto-runs, and an UNCONFIRMED `POST /api/v1/chains/:id/run` rejects it with `409 needsConfirmation` before it executes. But a CONFIRMED mutation run (`{ "confirmMutation": true }` against a verified domain) does execute and reaches verdict routing exactly like a read-only chain, firing the real side effect once (see §7 and the SKILL.md "Running mutation tests (explicit confirmation)" note). A human running it from the dashboard gets the same verdict under per-step approval.
 
 ## 5. Worked example: Supabase cross-tenant IDOR
 
@@ -147,14 +147,30 @@ Body: `{ title, targetHost, severity, spec, source? }`. Success `201`:
 ```
 `autoReplay: true` means the chain is allowed to run. If the request looked mutating (write-style method/path), the response instead carries `"note": "Mutating chain stored as manual-only; it will not auto-run."` — meaning it was stored but won't auto-run, and a `/run` call returns 409. Errors: `400` (validation / SSRF), `401` (auth), `500`.
 
+### PATCH /api/v1/chains/:id (modify)
+
+Owner-scoped in-place edit. Body: `{ title?, severity?, spec? }`, supply at least one. When `spec` changes it is re-validated (same rules as ingest, §6) and the side-effect is re-derived, so changing a method to a non-GET can flip the chain to `mutation` (manual-only). `title` must stay unique among your ACTIVE chains; a rename that collides with another active chain returns `409`. Use this to fix or evolve a test in place instead of archive-then-reingest. Success `200`:
+```json
+{ "chainId": "<uuid>", "title": "...", "severity": "high",
+  "sideEffect": "read_only", "autoReplay": true, "updatedAt": "..." }
+```
+Errors: `400` (validation / SSRF / no fields), `401`, `403` (chain belongs to another user), `404`, `409` (title collision with another active chain), `500`.
+
 ### POST /api/v1/chains/:id/run (re-execute)
 
-No body. Success `200`:
+Optional body. For a read-only chain, no body is needed. For a `mutation` chain you must send `{ "confirmMutation": true }` to actually run it (it fires a real side effect once). Success `200`:
 ```json
 { "runId": "<uuid>", "result": "vulnerable|fixed|inconclusive",
   "reason": "human-readable gate reason", "matched": true, "regression": false }
 ```
-`matched` is true only on `vulnerable`. `regression` is true when a chain that previously read `fixed` now reads `vulnerable` (i.e. the bug came back). Errors: `401`, `403` (chain belongs to another user), `404`, `409` (chain is disabled, or was treated as mutating and is therefore manual-only — it won't auto-run), `500`.
+`matched` is true only on `vulnerable`. `regression` is true when a chain that previously read `fixed` now reads `vulnerable` (i.e. the bug came back).
+
+Mutation specifics:
+- A mutation chain run WITHOUT `confirmMutation` returns `409 { "error": "...", "sideEffect": "mutation", "needsConfirmation": true }` and does not execute. That 409 is the confirmation gate, not a verdict.
+- A mutation chain run also requires a VERIFIED domain. Monitored-but-not-verified is not enough (read-only runs get the monitored trust-the-owner relaxation, mutation runs do not). If ownership is not verified you get a `403` telling you to verify the domain first.
+- With `{ "confirmMutation": true }` against a verified domain, it executes and returns the normal verdict, firing the real write/charge/OTP exactly once.
+
+Errors: `401`, `403` (chain belongs to another user, or a mutation run on a domain whose ownership is not verified), `404`, `409` (chain disabled, or an unconfirmed mutation needing `confirmMutation`), `500`.
 
 ### DELETE /api/v1/chains/:id (archive)
 
