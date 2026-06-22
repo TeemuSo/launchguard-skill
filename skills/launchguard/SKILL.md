@@ -21,6 +21,8 @@ This skill verifies your app's security through two complementary checks:
 
 After both, you get a clear checklist of what's verified vs what still needs attention.
 
+> **Before you call anything a "finding" — from the scan OR a custom test — read `methodology.md` in this skill directory.** It is the pentester judgment layer: an ordered procedure (threat-model → reachability-from-fresh-state → enumerability → escalation → honest severity → intended-public filter → validation gate) that turns raw "the endpoint answered 200" into a defensible finding, and filters out the false positives a non-expert would otherwise ship. Load it for any "check my app" / "is this secure" / "find my vulnerabilities" request.
+
 ---
 
 ## What the external scan verifies
@@ -268,6 +270,8 @@ Because the app is now **monitored**, a chain against it (read-only OR mutating)
 ## Bring Your Own Test (custom exploit chains)
 
 Use this when the user wants to *prove* a specific exposure, not just scan. Triggers: "prove a stranger can run up my bill", "show this is actually exploitable", "write a test that reproduces this", "author a chain", or anything that names a `chain` or a Bring Your Own Test.
+
+> **READ `methodology.md` in this skill directory BEFORE authoring any test or calling anything a "finding".** The chain *format* below is mechanics; `methodology.md` is the *judgment* — the ordered pentester procedure (threat-model from intent → reachability from a fresh anonymous state → enumerability/id-confidentiality → escalation chaining → stateful preconditions → honest CVSS → false-positive/intended-public filter → a validation gate before you report). It is what stops a non-expert's agent from shipping false positives (flagging intended-public `/api/stats`) or non-weaponizable "findings" (an IDOR on an id the test created itself). Apply it to the free-scan results too, not just custom tests.
 
 **Mental model:** a custom test is ONE HTTP request plus a rule (a "matcher") that says what "exploited" looks like versus what "safe/patched" looks like. You author it as JSON, submit it to LaunchGuard, and get back a verdict. That's the whole idea — no other concepts required.
 
