@@ -113,6 +113,24 @@ Optional and passed through to the engine if present: `step.label`, `step.authRe
 
 Both require `Authorization: Bearer $LAUNCHGUARD_API_KEY`. Base URL: use `https://api.launchguard.dev`. If any `/api/v1/...` call returns 404, the public edge isn't live yet — fall back to `https://recon-api-dev.centrive.ai` (LaunchGuard's own backend host, safe to call).
 
+### GET /api/v1/chains (list — call this BEFORE authoring)
+
+Optional `?targetHost=<host>` filter (normalized the same way ingest derives `host`). Success `200`:
+```json
+{ "targetHost": "sandbox.example.com", "count": 2, "chains": [
+  { "chainId": "<uuid>", "targetHost": "sandbox.example.com", "title": "...",
+    "severity": "high", "source": "ai_agent", "sideEffect": "read_only",
+    "status": "active", "lastResult": "vulnerable", "lastTestedAt": "...",
+    "enabled": true, "autoReplay": true, "createdAt": "...",
+    "exploit": { "method": "POST", "path": "/api/chat", "target": "primary" } }
+] }
+```
+`exploit` (`{method, path, target}`) is the **dedupe key** — before authoring a new chain, list the existing ones for the host and skip any whose `exploit` already covers the same request. Owner-scoped. Errors: `400` (bad `targetHost`), `401`, `500`.
+
+### GET /api/v1/chains/:id (read one full blueprint)
+
+Returns a single chain end-to-end, including the complete `spec` (steps + assertion + allowedTargets), plus `declaredSideEffect` / `derivedSideEffect` / `specVersion` / `updatedAt`. Use this to inspect an existing test before re-running it or proposing a variant. Owner-scoped: another user's chain (or a missing one) returns `404`. Errors: `400` (no id), `401`, `404`, `500`.
+
 ### POST /api/v1/chains (ingest)
 
 Body: `{ title, targetHost, severity, spec, source? }`. Success `201`:

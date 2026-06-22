@@ -293,9 +293,9 @@ A custom test is one HTTP request plus a matcher block that says "exploited look
 | pull a value out for a later step | `steps[].extract[]` | only needed for multi-step chains |
 | severity | top-level `severity` | `critical` \| `high` \| `medium` \| `low` |
 
-That is the whole matcher vocabulary. Do NOT invent `bodyContainsAny`, `statusEquals`, `regex`, etc. The full assertion set (cross-tenant IDOR, extractors, JSONPath dialect, verdict routing) is in `chains-reference.md` in this skill directory.
+That is the whole matcher vocabulary. Do NOT invent `bodyContainsAny`, `statusEquals`, `regex`, etc.
 
-(Optional aside, only if you happen to know Nuclei: this is the same idea as a Nuclei template expressed as JSON — one HTTP request plus a matcher. Not a prerequisite.)
+**Two templates cover almost everything:** the **anonymous read** (Step 3, the 90% case) and the **authenticated cross-tenant read** (Step 3b, the flagship "a logged-in user can see another tenant's data" test). Both are inlined below. For anything beyond them, such as multi-step chains, extractors, the exact JSONPath dialect, `minTotalRows`, or the full verdict-routing rules, **READ `chains-reference.md` in this skill directory before authoring.** SKILL.md gives you the two templates; the reference gives you the rest. Authenticated and cross-tenant tests in particular depend on fields (`spec.env.anonKey`, `crossTenant`) that only the reference fully specifies.
 
 ### Step 1: Get the user's API key
 
@@ -328,6 +328,19 @@ curl -X POST https://api.launchguard.dev/api/v1/domains/verify \
   -H "Authorization: Bearer $LAUNCHGUARD_API_KEY" -H "Content-Type: application/json" \
   -d '{"domain":"sandbox.example.com"}'      # -> { "verified": true }
 ```
+
+### Step 2.5: list existing chains first (avoid duplicates)
+
+Before authoring anything, list what already exists for this host so you don't re-create a test that's already there:
+
+```bash
+curl -s "https://api.launchguard.dev/api/v1/chains?targetHost=sandbox.example.com" \
+  -H "Authorization: Bearer $LAUNCHGUARD_API_KEY"
+```
+
+Response: `{ "count": N, "chains": [ { "chainId": "...", "title": "...", "lastResult": "...", "exploit": { "method": "POST", "path": "/api/chat", "target": "primary" } }, ... ] }`
+
+The `exploit` object (`{method, path, target}`) is the **dedupe key**. If a chain already covers the same method+path+target, do NOT author a new one — instead re-run it (`POST /chains/<id>/run`) or, if the user wants a genuinely different assertion, inspect the full blueprint first with `GET /api/v1/chains/<chainId>` (returns the complete `spec`) and propose a distinct variant. Only author a new chain when nothing in the list covers the rule you're testing.
 
 ### Step 3: write the proving curl first, then translate it
 
@@ -372,12 +385,53 @@ Notes on the template:
 
 Pick a positive marker that proves the **paid work actually ran**: a completion id, a queued job id, a provider response field — whatever field you actually observed. That marker is your `jsonPathsPresent` (a field that must exist) or `bodyContainsAll` (literal substrings).
 
+### Step 3b: authenticated cross-tenant test (the second template)
+
+Use this to prove **"a logged-in user can read another tenant's rows"**: broken or missing row-level security on a Supabase table. This is LaunchGuard's flagship authenticated test; a generic scanner can't write it. The engine signs up a **fresh throwaway account per run** (via `spec.env.anonKey`) and queries the table as that low-privilege identity. If any returned row is owned by someone else, RLS is broken.
+
+You need the target's **public** Supabase anon key + project ref — both client-side values you can read from the site's JS bundle or the free scan's `secrets` output (the anon key is a `eyJ...` JWT; it is meant to be public, so using it is not exfiltration). Template:
+
+```json
+{
+  "title": "Authenticated user can read other tenants' rows in `businesses`",
+  "targetHost": "sandbox.example.com",
+  "severity": "critical",
+  "source": "ai_agent",
+  "spec": {
+    "version": 2,
+    "steps": [
+      {
+        "order": 1, "id": "exploit", "label": "Query a tenant table as a fresh signed-up user",
+        "role": "exploit", "sideEffect": "read_only",
+        "request": { "method": "GET", "target": "supabase",
+          "path": "/rest/v1/businesses?select=id,user_id,created_at" }
+      }
+    ],
+    "assertion": {
+      "successStatusIn": [200, 206],
+      "fixedStatusIn": [401, 403],
+      "crossTenant": { "ownerJsonPath": "$[*].user_id", "notEqualsVar": "{{auth.userId}}", "minForeignRows": 1 },
+      "errorEnvelopeContainsAny": ["row-level security", "permission denied", "\"code\":\"42501\"", "\"code\":\"PGRST"],
+      "contentTypeIncludes": "application/json"
+    },
+    "auth": {},
+    "env": { "anonKey": "<the target's public eyJ... anon key>" },
+    "sideEffect": "read_only",
+    "allowedTargets": { "primary": "sandbox.example.com", "supabase": "<project-ref>.supabase.co" }
+  }
+}
+```
+
+How it reads: `target: "supabase"` routes the request to `allowedTargets.supabase`; `{{auth.userId}}` resolves to the fresh signup's own id; `crossTenant` passes only if at least one row's `user_id` differs from it → `vulnerable` (RLS broken). A `401`/`403` or an RLS-denial envelope (`42501`/`PGRST`) → `fixed` (RLS working). Replace `businesses` and `user_id` with a real tenant table + its owner column (discover them from the free scan's `supabase_findings`). The `crossTenant` shape, the JSONPath dialect, and `minTotalRows` (an alternative "more rows than this user could own" marker) are detailed in `chains-reference.md`.
+
 ### Footguns the validator and engine enforce (these fail authors most)
 
 - **`allowedTargets.primary` must byte-equal the normalized `targetHost`** (lowercased, no scheme, no path, no port). Pre-normalize it yourself, e.g. `https://Sandbox.Example.com/x` becomes `sandbox.example.com`.
 - **`request.target` is the enum `primary` / `supabase` / `api`, not a URL.** The host comes from `allowedTargets[target]`.
 - **`spec.sideEffect` (top-level) is required** and must be a string. Use `"read_only"` for read exploits.
 - **Always include at least one positive marker** (`jsonPathsPresent` / `bodyContainsAll` / `crossTenant` / `minTotalRows`). `successStatusIn` alone can only ever yield `fixed` or `inconclusive`, never `vulnerable`.
+- **Always include `fixedStatusIn`** (e.g. `[401,403,429]`). It is documented as optional but the engine throws at run time without it (`fixedStatusIn is not iterable`), turning a valid chain into a false `inconclusive`. Never omit it.
+- **`title` must be unique on your account, and there is NO delete/disable endpoint.** Re-ingesting with a title that already exists fails (`500`), and a bad chain cannot be removed via the API, so get the spec right before you ingest, and give each chain a fresh, descriptive title. A duplicate-but-broken chain can only be cleaned up server-side by a human.
 - **A 404 is never `fixed`.** Only `401` / `403` / `429` (listed in `fixedStatusIn`) or a proven-empty result count as patched, so a deleted endpoint never reads as a false fix.
 - **Side-effect is silently re-derived from method+path.** A path that looks mutating (`/reset`, `/delete`, `/send`) is treated as a write, even if you declared it read-only. In plain terms: the chain becomes "manual-only" — it is stored but won't auto-run, and a `/run` call returns 409. Keep read-only proofs on read-only-looking paths.
 - **JSONPath is a custom subset** (`$.a.b`, `$[0]`, `$[*].x`, `$[?(@.x != "y")]`). No recursive `..`, no slices, only `==` / `!=`. See `chains-reference.md`.
@@ -395,6 +449,8 @@ curl -X POST https://api.launchguard.dev/api/v1/chains \
 curl -X POST https://api.launchguard.dev/api/v1/chains/<chainId>/run \
   -H "Authorization: Bearer $LAUNCHGUARD_API_KEY" -H "Content-Type: application/json"
 ```
+
+The `/run` response also carries `matched` (true only on `vulnerable`) and `regression` (true when a chain that previously read `fixed` now reads `vulnerable`, i.e. a fixed bug came back). On every later deploy the chain re-runs; `regression: true` is the alarm that a protection you'd verified has broken again.
 
 Report the verdict plainly:
 - `vulnerable` plus the `reason` (e.g. `exploit_reproduced: assertions passed`) means the paid path is reachable unauthenticated. Show the user the marker that proved it.
