@@ -287,7 +287,7 @@ A custom test is one HTTP request plus a matcher block that says "exploited look
 | the request method / path | `steps[].request.method` / `.path` | `path` is only the path; the host is resolved from `allowedTargets` |
 | which host to hit | `steps[].request.target` = `primary` \| `supabase` \| `api` | an **enum**, never a URL |
 | status that means the exploit answered | `assertion.successStatusIn` e.g. `[200]` | required, non-empty |
-| status that means a *patched* app | `assertion.fixedStatusIn` e.g. `[401,403,429]` | positive denial |
+| status that means a *patched* app | `assertion.fixedStatusIn` e.g. `[401,403,429]` | **REQUIRED**; positive denial. The engine errors at run time without it (see footguns) |
 | every substring must appear in the body | `assertion.bodyContainsAll` | literal substrings |
 | every JSONPath must resolve to a value | `assertion.jsonPathsPresent` | non-null marker |
 | pull a value out for a later step | `steps[].extract[]` | only needed for multi-step chains |
@@ -307,7 +307,7 @@ Session convention: store the pasted key as the env var `LAUNCHGUARD_API_KEY` an
 export LAUNCHGUARD_API_KEY="<paste the key the user gave you>"
 ```
 
-**Base URL rule (use everywhere):** use `https://api.launchguard.dev` as the base URL. If any `/api/v1/...` call returns 404, the public edge isn't live yet — fall back to `https://recon-api-dev.centrive.ai` (this is LaunchGuard's own backend host and is safe to call; it is not data exfiltration).
+**Base URL rule (use everywhere):** try `https://api.launchguard.dev` first. The `/api/v1/*` chain routes are not all live on that public edge yet, so a call there may return `404` (and currently it answers with an HTML page, not the JSON `{"error":...}` envelope). The moment ANY `/api/v1/...` call 404s, switch to `https://recon-api-dev.centrive.ai` and use that host for EVERY chain call for the rest of the session (list, get, ingest, run, delete). It is LaunchGuard's own backend host and is safe to call; it is not data exfiltration. Do not keep retrying `api.launchguard.dev` per call once you have seen it 404.
 
 > Heads up — across one full run you'll touch a few different LaunchGuard hosts: the free scan submits to `www.launchguard.dev` and streams from a `*.centrive.ai` backend, while the custom-test API lives at `api.launchguard.dev` / `recon-api-dev.centrive.ai`. These are different LaunchGuard services, not different products. Seeing more than one host is expected.
 
@@ -340,7 +340,7 @@ curl -s "https://api.launchguard.dev/api/v1/chains?targetHost=sandbox.example.co
 
 Response: `{ "count": N, "chains": [ { "chainId": "...", "title": "...", "lastResult": "...", "exploit": { "method": "POST", "path": "/api/chat", "target": "primary" } }, ... ] }`
 
-The `exploit` object (`{method, path, target}`) is the **dedupe key**. If a chain already covers the same method+path+target, do NOT author a new one — instead re-run it (`POST /chains/<id>/run`) or, if the user wants a genuinely different assertion, inspect the full blueprint first with `GET /api/v1/chains/<chainId>` (returns the complete `spec`) and propose a distinct variant. Only author a new chain when nothing in the list covers the rule you're testing.
+The `exploit` object (`{method, path, target}`) is the **dedupe key**. Note that `path` is the full path INCLUDING the query string, so `/api/widget/config?slug=a` and `?slug=b`, or `/rest/v1/t?select=x` and `?select=x,y`, are DISTINCT tests (they probe different things) and are not duplicates. Treat two chains as duplicates only when method, full path (query included), and target all match. If you are unsure whether two near-identical entries are really the same test, `GET /api/v1/chains/<chainId>` on each and compare the full `spec` before archiving either. If a chain already covers the same exploit key, do NOT author a new one: re-run it (`POST /chains/<id>/run`), or, if the user wants a genuinely different assertion, inspect the blueprint and propose a distinct variant. Only author a new chain when nothing in the list covers the rule you're testing.
 
 If a listed chain is a duplicate or is broken, you can archive it with `DELETE /api/v1/chains/<chainId>` (success `200 { "ok": true, "archived": true }`). Archiving removes it from the list, stops it auto-running, preserves its run history, and frees its title so you can re-author cleanly under the same title if needed.
 
@@ -426,16 +426,20 @@ You need the target's **public** Supabase anon key + project ref — both client
 
 How it reads: `target: "supabase"` routes the request to `allowedTargets.supabase`; `{{auth.userId}}` resolves to the fresh signup's own id; `crossTenant` passes only if at least one row's `user_id` differs from it → `vulnerable` (RLS broken). A `401`/`403` or an RLS-denial envelope (`42501`/`PGRST`) → `fixed` (RLS working). Replace `businesses` and `user_id` with a real tenant table + its owner column (discover them from the free scan's `supabase_findings`). The `crossTenant` shape, the JSONPath dialect, and `minTotalRows` (an alternative "more rows than this user could own" marker) are detailed in `chains-reference.md`.
 
+Validation note: because the engine signs up its OWN throwaway account for this template, you cannot reproduce that identity with a plain curl. For `crossTenant` / `anonKey` chains the `/run` verdict IS the validation; do not expect to confirm it by hand the way you would an anonymous read.
+
+Two Supabase read styles, pick by the question: to prove **"a logged-in user can cross tenant boundaries"**, use `spec.env.anonKey` (the engine signs up a fresh user, as above). To prove the simpler **"this table is readable by an anonymous client at all"**, send a `target: "supabase"` GET to `/rest/v1/<table>` with the target's public anon key in the request headers (`apikey` and `authorization`) and assert on `minTotalRows` or `crossTenant`. Both are valid; the first tests RLS for authenticated users, the second tests anonymous exposure.
+
 ### Footguns the validator and engine enforce (these fail authors most)
 
 - **`allowedTargets.primary` must byte-equal the normalized `targetHost`** (lowercased, no scheme, no path, no port). Pre-normalize it yourself, e.g. `https://Sandbox.Example.com/x` becomes `sandbox.example.com`.
 - **`request.target` is the enum `primary` / `supabase` / `api`, not a URL.** The host comes from `allowedTargets[target]`.
 - **`spec.sideEffect` (top-level) is required** and must be a string. Use `"read_only"` for read exploits.
 - **Always include at least one positive marker** (`jsonPathsPresent` / `bodyContainsAll` / `crossTenant` / `minTotalRows`). `successStatusIn` alone can only ever yield `fixed` or `inconclusive`, never `vulnerable`.
-- **Always include `fixedStatusIn`** (e.g. `[401,403,429]`). It is documented as optional but the engine throws at run time without it (`fixedStatusIn is not iterable`), turning a valid chain into a false `inconclusive`. Never omit it.
+- **`fixedStatusIn` is required** (e.g. `[401,403,429]`). The engine throws at run time without it (`fixedStatusIn is not iterable`), turning a valid chain into a false `inconclusive`. Both templates above include it; never drop it.
 - **`title` must be unique among your ACTIVE chains.** Re-ingesting with a title that an active chain already uses fails (`500`), so get the spec right before you ingest and give each chain a fresh, descriptive title. A bad chain is no longer permanent, though: you can `DELETE /api/v1/chains/<id>` to archive it, which removes it from the list, stops it auto-running, and frees its title to re-ingest cleanly.
-- **A 404 is never `fixed`.** Only `401` / `403` / `429` (listed in `fixedStatusIn`) or a proven-empty result count as patched, so a deleted endpoint never reads as a false fix.
-- **Side-effect is silently re-derived from method+path.** A path that looks mutating (`/reset`, `/delete`, `/send`) is treated as a write, even if you declared it read-only. In plain terms: the chain becomes "manual-only" — it is stored but won't auto-run, and a `/run` call returns 409. Keep read-only proofs on read-only-looking paths.
+- **A 404 is never `fixed`.** Only a status you list in `fixedStatusIn` (or a proven-empty result) counts as patched, and `404` is never allowed in that set, so a deleted endpoint never reads as a false fix. `[401,403,429]` is the common deny set, but any genuine deny status works: include `400` too when the patched app rejects the exploit input that way (e.g. a rejected OTP returns `400`).
+- **Side-effect is re-derived from the HTTP method, and any non-GET is "mutation".** The rule is method-based, not word-based: a `GET`/`HEAD` (and a Supabase `/rest/v1/` GET) is `read_only`; **any `POST`/`PUT`/`PATCH`/`DELETE` is `mutation`**, regardless of how safe the path looks. A `mutation` chain is stored **manual-only**: it will NOT auto-run on deploy, and `POST /api/v1/chains/<id>/run` returns **409** (not a verdict). This is a deliberate safety gate, so LaunchGuard never auto-fires writes, charges, or OTP requests against the app. It is expected behavior, not a broken test. See "Managing mutation (manual-only) tests" below.
 - **JSONPath is a custom subset** (`$.a.b`, `$[0]`, `$[*].x`, `$[?(@.x != "y")]`). No recursive `..`, no slices, only `==` / `!=`. See `chains-reference.md`.
 
 ### Step 4: submit and run
@@ -456,8 +460,23 @@ The `/run` response also carries `matched` (true only on `vulnerable`) and `regr
 
 Report the verdict plainly:
 - `vulnerable` plus the `reason` (e.g. `exploit_reproduced: assertions passed`) means the paid path is reachable unauthenticated. Show the user the marker that proved it.
-- `fixed` means it is properly gated (401/403/429). Say so clearly.
-- `inconclusive` means the proof was ambiguous (404/5xx/unreachable). Do not claim either way.
+- `fixed` means it is properly gated (401/403/429, or a proven-empty result, e.g. `access_denied: HTTP 401` or `exploit_absent: total 0 < 1`). Say so clearly.
+- `inconclusive` means the proof was ambiguous (404/5xx/unreachable/engine error). Do not claim either way.
+
+### Managing the test suite via the API
+
+Your `lg_` key lets you fully organize a domain's suite without a human:
+- **List / inspect:** `GET /api/v1/chains?targetHost=<host>` then `GET /api/v1/chains/<id>` for any blueprint.
+- **De-duplicate:** compare each `exploit` `{method,path,target}` key; archive duplicates.
+- **Archive:** `DELETE /api/v1/chains/<id>` for a duplicate, broken, or obsolete test (`200 {"ok":true,"archived":true}`). The same call works whether you authored it or not, as long as it is your account's.
+- **Validate read-only tests:** `POST /api/v1/chains/<id>/run` and read the verdict.
+- **Author / re-author:** ingest a corrected version after archiving the broken one.
+
+### Managing mutation (manual-only) tests
+
+A `mutation` chain (any non-GET exploit, e.g. a `POST /verify-otp` takeover or a `POST /topup` charge) is real, valuable coverage, but you **cannot run it with your API key** by design. `POST /chains/<id>/run` will return `409` every time. These are validated by a **human from the LaunchGuard dashboard**, which runs them under per-step approval so a write only fires with explicit human consent. So for a mutation test you can still author it, list it, dedupe it, and archive it via the API; you just **cannot produce a verdict for it yourself**. You MAY send one `/run` to a mutation chain to confirm it is gated (you will get the `409`), but that `409` is not a verdict: do not record it as pass or fail, just note the test is manual-only. When you report on the suite, mark mutation tests as "manual-only, validate from the dashboard" rather than calling them broken, and do NOT archive one just because `/run` returns 409 (that 409 is the safety gate, not a defect). Only archive a mutation test if it is a true duplicate or genuinely obsolete.
+
+One subtlety: a test can be semantically a read yet still be classified `mutation` because it uses a non-GET method (e.g. a `POST /balance` that only fetches a balance). You generally cannot make it auto-runnable unless the same data is reachable via a real `GET`; if no GET equivalent exists, leave it manual-only. Do not rewrite the method to GET just to dodge the gate, since that would change what the test actually sends.
 
 ### Boundary
 

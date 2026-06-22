@@ -15,7 +15,7 @@ These are the only assertion fields that exist. Anything not in this table is ig
 | Field | Type | Meaning |
 |---|---|---|
 | `successStatusIn` | `number[]` (REQUIRED, non-empty) | statuses that mean "the exploit surface answered", e.g. `[200]`, `[200,206]` |
-| `fixedStatusIn` | `number[]` | statuses that positively mean denied. Use `[401,403,429]` |
+| `fixedStatusIn` | `number[]` (REQUIRED, non-empty) | statuses that positively mean denied. Use `[401,403,429]`. The engine throws (`fixedStatusIn is not iterable`) and the run routes to a false `inconclusive` if you omit it |
 | `jsonPathsPresent` | `string[]` | every listed JSONPath must resolve to at least one non-null value |
 | `bodyContainsAll` | `string[]` | every literal substring must appear in the raw body (supports `{{var}}` binding) |
 | `crossTenant` | `{ ownerJsonPath, notEqualsVar, minForeignRows }` | the sound IDOR positive: prove rows owned by someone other than the replay identity |
@@ -59,6 +59,14 @@ Coupling rule: the assertion is evaluated against the single `exploit` step only
 - status outside both sets (404, 5xx, unexpected), transport error, unreachable, unparseable body, auth setup failed -> `inconclusive`
 
 Key consequence: a `404` is NEVER `fixed`. To get a clean "the bug is gone" signal the target must return `401`/`403`/`429`, or you must rely on a proven-empty count. This is by design so a deleted or renamed endpoint never falsely reads as patched.
+
+The `reason` string in a `/run` response names which branch fired, so you can report precisely:
+- `exploit_reproduced: assertions passed` -> `vulnerable`
+- `access_denied: HTTP <4xx>` -> `fixed` (status was in `fixedStatusIn`)
+- `exploit_absent: total N < M` -> `fixed` (proven empty, e.g. a `content-range` total of 0 or below `minTotalRows`)
+- `engine_error: <message>` -> `inconclusive` (a malformed assertion, e.g. a missing `fixedStatusIn`; fix the spec and re-run)
+
+Note: a `mutation` (manual-only) chain never reaches verdict routing through the API run path at all; `POST /api/v1/chains/:id/run` rejects it with `409` before it executes (see §7.3 and the SKILL.md "Managing mutation tests" note). Such chains are run by a human from the dashboard under per-step approval.
 
 ## 5. Worked example: Supabase cross-tenant IDOR
 
@@ -111,7 +119,7 @@ Optional and passed through to the engine if present: `step.label`, `step.authRe
 
 ## 7. Endpoint contracts
 
-Both require `Authorization: Bearer $LAUNCHGUARD_API_KEY`. Base URL: use `https://api.launchguard.dev`. If any `/api/v1/...` call returns 404, the public edge isn't live yet — fall back to `https://recon-api-dev.centrive.ai` (LaunchGuard's own backend host, safe to call).
+All require `Authorization: Bearer $LAUNCHGUARD_API_KEY`. Base URL: try `https://api.launchguard.dev`, but the `/api/v1/*` chain routes are not all live there yet, so a call may `404` (with an HTML page, not the JSON error envelope). As soon as one `/api/v1/...` call 404s, switch to `https://recon-api-dev.centrive.ai` for every chain call for the rest of the session (LaunchGuard's own backend host, safe to call). Do not retry `api.launchguard.dev` once you have seen it 404.
 
 ### GET /api/v1/chains (list — call this BEFORE authoring)
 
@@ -150,7 +158,7 @@ No body. Success `200`:
 
 ### DELETE /api/v1/chains/:id (archive)
 
-Soft-deletes (archives) a chain. This is a reversible-on-the-server archive, not a hard delete: the chain disappears from `GET /api/v1/chains`, stops auto-running on deploys, and its run history is preserved. Archiving also frees the title, so the same title can be re-ingested afterward. Owner-scoped. Success `200`:
+Soft-deletes (archives) a chain. Internally it stamps `deleted_at` rather than hard-deleting, so the row and its run history are retained server-side, but for your purposes it is a removal: the chain disappears from `GET /api/v1/chains`, stops auto-running on deploys, and cannot be run. There is no un-archive API endpoint, so do not present this as an easily reversible toggle. Archiving frees the title, so the same title can be re-ingested afterward (effectively replacing it). Owner-scoped. Success `200`:
 ```json
 { "ok": true, "chainId": "<id>", "archived": true }
 ```
