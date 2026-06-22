@@ -66,7 +66,7 @@ The `reason` string in a `/run` response names which branch fired, so you can re
 - `exploit_absent: total N < M` -> `fixed` (proven empty, e.g. a `content-range` total of 0 or below `minTotalRows`)
 - `engine_error: <message>` -> `inconclusive` (a malformed assertion, e.g. a missing `fixedStatusIn`; fix the spec and re-run)
 
-Note: a `mutation` chain never auto-runs, and an UNCONFIRMED `POST /api/v1/chains/:id/run` rejects it with `409 needsConfirmation` before it executes. But a CONFIRMED mutation run (`{ "confirmMutation": true }` against a verified domain) does execute and reaches verdict routing exactly like a read-only chain, firing the real side effect once (see §7 and the SKILL.md "Running mutation tests (explicit confirmation)" note). A human running it from the dashboard gets the same verdict under per-step approval.
+Note: a `mutation` chain never auto-runs, and an UNCONFIRMED `POST /api/v1/chains/:id/run` rejects it with `409 needsConfirmation` before it executes. But a CONFIRMED mutation run (`{ "confirmMutation": true }` against a monitored domain) does execute and reaches verdict routing exactly like a read-only chain, firing the real side effect once (see §7 and the SKILL.md "Running mutation tests (explicit confirmation)" note). A human running it from the dashboard gets the same verdict under per-step approval.
 
 ## 5. Worked example: Supabase cross-tenant IDOR
 
@@ -167,10 +167,10 @@ Optional body. For a read-only chain, no body is needed. For a `mutation` chain 
 
 Mutation specifics:
 - A mutation chain run WITHOUT `confirmMutation` returns `409 { "error": "...", "sideEffect": "mutation", "needsConfirmation": true }` and does not execute. That 409 is the confirmation gate, not a verdict.
-- A mutation chain run also requires a VERIFIED domain. Monitored-but-not-verified is not enough (read-only runs get the monitored trust-the-owner relaxation, mutation runs do not). If ownership is not verified you get a `403` telling you to verify the domain first.
-- With `{ "confirmMutation": true }` against a verified domain, it executes and returns the normal verdict, firing the real write/charge/OTP exactly once.
+- A mutation chain run works against any domain the user MONITORS (has added to their account); trust-the-owner covers mutations the same as read-only runs, so no separate DNS verification is needed. A host that is not in the account still needs verified ownership, and a run against one returns `403`.
+- With `{ "confirmMutation": true }` against a monitored domain, it executes and returns the normal verdict, firing the real write/charge/OTP exactly once.
 
-Errors: `401`, `403` (chain belongs to another user, or a mutation run on a domain whose ownership is not verified), `404`, `409` (chain disabled, or an unconfirmed mutation needing `confirmMutation`), `500`.
+Errors: `401`, `403` (chain belongs to another user, or a run targeting a host not in the user's account), `404`, `409` (chain disabled, or an unconfirmed mutation needing `confirmMutation`), `500`.
 
 ### DELETE /api/v1/chains/:id (archive)
 
