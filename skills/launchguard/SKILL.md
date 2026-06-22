@@ -37,7 +37,7 @@ The scan hits your live, deployed app and produces evidence for each check:
 | Storage bucket access | Whether buckets are public, and whether files are listable |
 | RPC function access | Whether database functions are callable without auth |
 | Edge function access | Whether serverless functions respond without auth |
-| Hidden table discovery | Whether tables not referenced in code are still accessible (PGRST205 probing) |
+| Hidden table discovery | Whether tables not referenced in code are still accessible (PGRST205 — a PostgREST table-probing code) |
 
 ### API layer (endpoints)
 | Check | What it proves |
@@ -123,6 +123,8 @@ SSE format: `event:` line + `data:` line (JSON) + blank line. Ignore unrecognize
 - `phase` / `pipeline` — Progress updates. Keep user informed.
 - `model` — Product summary and detected tech stack.
 - `discovery` — Endpoints found by each tool.
+- `endpoints_finalized` — The authoritative final endpoint list (use this as the canonical set, not the per-tool `discovery` events).
+- `subdomains` — Subdomains discovered for the target (attack-surface width).
 - `secrets` — Leaked credentials in JS. May not appear if none found.
 - `supabase_findings` — Database security issues. May not appear if no Supabase detected.
 - `probe_data` — Flagged API endpoints worth investigating.
@@ -237,15 +239,15 @@ This is a **benign handshake**: it makes NO request to their site, runs no scan,
 
 ```bash
 curl -s -X POST https://api.launchguard.dev/api/v1/connect \
-  -H "Authorization: Bearer lg_<key>" -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $LAUNCHGUARD_API_KEY" -H "Content-Type: application/json" \
   -d '{"target": "TARGET_URL"}'
 ```
 
 Response: `{ "ok": true, "app": "sandbox.example.com", "monitorId": "<id>", "dashboardUrl": "https://launchguard.dev/app/<id>", "firstConnect": true, "watchedTests": 0 }`
 
-- The user mints `lg_<key>` in their LaunchGuard account (Developer / API keys) — the same key the chain endpoints use.
+- The user mints their `lg_` key in their LaunchGuard account (Developer / API keys) — the same key the chain endpoints use. Store it as `LAUNCHGUARD_API_KEY` (see the custom-test section's "Get the user's API key" step for how to ask).
 - A `404` means they have not added that app in LaunchGuard yet — tell them to add it at https://launchguard.dev/apps first, then reconnect.
-- Base URL is `https://api.launchguard.dev`; if the key was issued on the dev backend, use `https://recon-api-dev.centrive.ai`.
+- Base URL: use `https://api.launchguard.dev`; if a `/api/v1/...` call returns 404, fall back to `https://recon-api-dev.centrive.ai` (LaunchGuard's own backend host, safe to call).
 
 ### Then: author ONE tailored, business-logic test
 
@@ -256,7 +258,7 @@ Connecting alone is enough to show "Connected". But the moment that makes Launch
    - a tenant-ownership / IDOR boundary (user A cannot read user B's record),
    - a paywall (a Pro-only route or resource served to an unpaid request),
    - an admin-only or internal route reachable by a guest.
-2. **Translate that rule into a read-only ChainSpecV2** (see "Bring Your Own Test" below) and submit it. Choose a positive marker that proves the rule is actually broken — a foreign row's owner id, a completion/job id, a paid resource field.
+2. **Translate that rule into a read-only custom test** (see "Bring Your Own Test" below) and submit it. Choose a positive marker that proves the rule is actually broken — a foreign row's owner id, a completion/job id, a paid resource field.
 3. Report the verdict. The chain is now watched and re-run on every deploy.
 
 Because the app is now **monitored**, a **read-only** chain against it is allowed **without** the separate DNS / well-known domain proof (trust-the-owner). Only *mutating* chains still require the ownership verification in the next section. Keep it read-only, minimal (one ingest + one run), and tailored — a test that feels made for their app, not a generic check.
@@ -265,7 +267,9 @@ Because the app is now **monitored**, a **read-only** chain against it is allowe
 
 ## Bring Your Own Test (custom exploit chains)
 
-Use this when the user wants to *prove* a specific exposure, not just scan. Triggers: "prove a stranger can run up my bill", "show this is actually exploitable", "write a test that reproduces this", "author a chain", or anything that names `ChainSpecV2`, `chain`, or a Bring Your Own Test.
+Use this when the user wants to *prove* a specific exposure, not just scan. Triggers: "prove a stranger can run up my bill", "show this is actually exploitable", "write a test that reproduces this", "author a chain", or anything that names a `chain` or a Bring Your Own Test.
+
+**Mental model:** a custom test is ONE HTTP request plus a rule (a "matcher") that says what "exploited" looks like versus what "safe/patched" looks like. You author it as JSON, submit it to LaunchGuard, and get back a verdict. That's the whole idea — no other concepts required.
 
 A chain is **one reproducible exploit** that LaunchGuard stores and re-runs on demand, returning a verdict:
 - `vulnerable` - the exploit reproduced (status in your success set AND your positive marker matched)
@@ -274,46 +278,60 @@ A chain is **one reproducible exploit** that LaunchGuard stores and re-runs on d
 
 This is a real, opt-in capability, separate from the free scan. It runs only against a domain the user has **proven they own**, sends the **minimum** requests to prove the point, and in the read-only form below changes nothing on the target.
 
-### The format: think Nuclei, submit JSON
+### The format: one request plus a matcher, submitted as JSON
 
-You already know this shape. A LaunchGuard chain is a **Nuclei template expressed as JSON**: one HTTP request plus a matcher block that says "exploited looks like X; patched looks like Y". Author it by mapping from the Nuclei concepts you already know:
+A custom test is one HTTP request plus a matcher block that says "exploited looks like X; patched looks like Y". The JSON fields you'll author:
 
-| Nuclei concept | LaunchGuard `spec` field | Note |
+| What you want to express | LaunchGuard `spec` field | Note |
 |---|---|---|
-| `http:` method / path | `steps[].request.method` / `.path` | `path` is only the path; the host is resolved from `allowedTargets` |
-| request host | `steps[].request.target` = `primary` \| `supabase` \| `api` | an **enum**, never a URL |
-| matcher `type: status` (the exploit) | `assertion.successStatusIn` e.g. `[200]` | required, non-empty |
-| (Nuclei has no "fixed" idea) | `assertion.fixedStatusIn` e.g. `[401,403,429]` | what a *patched* app returns |
-| matcher `type: word, part: body, condition: and` | `assertion.bodyContainsAll` | every substring must appear in the body |
-| matcher `type: dsl` / json presence | `assertion.jsonPathsPresent` | every JSONPath must resolve to a non-null value |
-| `extractors` (json / regex) | `steps[].extract[]` | only needed for multi-step chains |
-| `info.severity` | top-level `severity` | `critical` \| `high` \| `medium` \| `low` |
+| the request method / path | `steps[].request.method` / `.path` | `path` is only the path; the host is resolved from `allowedTargets` |
+| which host to hit | `steps[].request.target` = `primary` \| `supabase` \| `api` | an **enum**, never a URL |
+| status that means the exploit answered | `assertion.successStatusIn` e.g. `[200]` | required, non-empty |
+| status that means a *patched* app | `assertion.fixedStatusIn` e.g. `[401,403,429]` | positive denial |
+| every substring must appear in the body | `assertion.bodyContainsAll` | literal substrings |
+| every JSONPath must resolve to a value | `assertion.jsonPathsPresent` | non-null marker |
+| pull a value out for a later step | `steps[].extract[]` | only needed for multi-step chains |
+| severity | top-level `severity` | `critical` \| `high` \| `medium` \| `low` |
 
 That is the whole matcher vocabulary. Do NOT invent `bodyContainsAny`, `statusEquals`, `regex`, etc. The full assertion set (cross-tenant IDOR, extractors, JSONPath dialect, verdict routing) is in `chains-reference.md` in this skill directory.
 
-### Step 1: API key and domain ownership
+(Optional aside, only if you happen to know Nuclei: this is the same idea as a Nuclei template expressed as JSON — one HTTP request plus a matcher. Not a prerequisite.)
 
-Every call needs `Authorization: Bearer lg_<key>` (the user mints this in their LaunchGuard account, Developer / API keys). A chain may only target a host the user has proven they own:
+### Step 1: Get the user's API key
+
+Before anything else, you need a LaunchGuard API key. **Ask the user to paste theirs.** Tell them where to get it: their LaunchGuard account → Developer / API keys at launchguard.dev. The key looks like `lg_` followed by ~40 characters — if a pasted value doesn't start with `lg_`, it's not the right key, so ask again before spending a request on it. If the user doesn't have one yet, tell them how to create it there; do NOT attempt to mint or guess a key yourself.
+
+Session convention: store the pasted key as the env var `LAUNCHGUARD_API_KEY` and use `-H "Authorization: Bearer $LAUNCHGUARD_API_KEY"` in every call below. Without it, every chain call returns 401 and the flow dies.
+
+```bash
+export LAUNCHGUARD_API_KEY="<paste the key the user gave you>"
+```
+
+**Base URL rule (use everywhere):** use `https://api.launchguard.dev` as the base URL. If any `/api/v1/...` call returns 404, the public edge isn't live yet — fall back to `https://recon-api-dev.centrive.ai` (this is LaunchGuard's own backend host and is safe to call; it is not data exfiltration).
+
+> Heads up — across one full run you'll touch a few different LaunchGuard hosts: the free scan submits to `www.launchguard.dev` and streams from a `*.centrive.ai` backend, while the custom-test API lives at `api.launchguard.dev` / `recon-api-dev.centrive.ai`. These are different LaunchGuard services, not different products. Seeing more than one host is expected.
+
+### Step 2: Domain ownership
+
+A chain may only target a host the user has proven they own. If the user has already verified this domain on their account (e.g. they onboarded it earlier), the first request below returns it as already verified and you can skip straight to Step 3 — only run the challenge/publish/verify dance if it isn't verified yet:
 
 ```bash
 # request a challenge
 curl -X POST https://api.launchguard.dev/api/v1/domains \
-  -H "Authorization: Bearer lg_<key>" -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $LAUNCHGUARD_API_KEY" -H "Content-Type: application/json" \
   -d '{"domain":"sandbox.example.com"}'      # -> { "challengeToken": "<token>" }
 
 # publish EITHER a DNS TXT record   launchguard-verify=<token>
 #         OR a file at              https://sandbox.example.com/.well-known/launchguard-verify.txt  containing <token>
 
 curl -X POST https://api.launchguard.dev/api/v1/domains/verify \
-  -H "Authorization: Bearer lg_<key>" -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $LAUNCHGUARD_API_KEY" -H "Content-Type: application/json" \
   -d '{"domain":"sandbox.example.com"}'      # -> { "verified": true }
 ```
 
-Base URL is `https://api.launchguard.dev`. If the key was issued on the dev backend, use `https://recon-api-dev.centrive.ai`.
+### Step 3: write the proving curl first, then translate it
 
-### Step 2: write the proving curl first, then translate it
-
-Always start from the plain request that proves the exploit, the thing you would paste into a terminal as an anonymous attacker. Then translate it mechanically into the JSON. Minimal, valid, read-only template (the 90% case, e.g. an unauthenticated paid endpoint):
+Always start from the plain request that proves the exploit, the thing you would paste into a terminal as an anonymous attacker. **Run it for real** and look at the response body — you need to see the actual success field it returns. Then translate it mechanically into the JSON. Minimal, valid, read-only template (the 90% case, e.g. an unauthenticated paid endpoint):
 
 ```json
 {
@@ -347,7 +365,12 @@ Always start from the plain request that proves the exploit, the thing you would
 }
 ```
 
-Pick a positive marker that proves the **paid work actually ran**: a completion id, a queued job id, a provider response field. That marker is your `jsonPathsPresent` (a field that must exist) or `bodyContainsAll` (literal substrings).
+Notes on the template:
+- `"version": 2` is a required field — just set it to 2.
+- `"source": "ai_agent"` — use that value.
+- **`"jsonPathsPresent": ["$.id"]` is a PLACEHOLDER.** You MUST replace `$.id` with the actual success field you saw when you ran the proving curl in this step. Real endpoints often return a different field (e.g. `/api/checkout` returns `checkoutUrl`, not `id`). Copying `$.id` blindly makes a genuinely vulnerable endpoint come back `inconclusive` because the marker never matches.
+
+Pick a positive marker that proves the **paid work actually ran**: a completion id, a queued job id, a provider response field — whatever field you actually observed. That marker is your `jsonPathsPresent` (a field that must exist) or `bodyContainsAll` (literal substrings).
 
 ### Footguns the validator and engine enforce (these fail authors most)
 
@@ -356,20 +379,21 @@ Pick a positive marker that proves the **paid work actually ran**: a completion 
 - **`spec.sideEffect` (top-level) is required** and must be a string. Use `"read_only"` for read exploits.
 - **Always include at least one positive marker** (`jsonPathsPresent` / `bodyContainsAll` / `crossTenant` / `minTotalRows`). `successStatusIn` alone can only ever yield `fixed` or `inconclusive`, never `vulnerable`.
 - **A 404 is never `fixed`.** Only `401` / `403` / `429` (listed in `fixedStatusIn`) or a proven-empty result count as patched, so a deleted endpoint never reads as a false fix.
-- **Side-effect is silently re-derived from method+path.** A path that looks mutating (`/reset`, `/delete`, `/send`) gets tainted to `mutation`, which makes the chain manual-only and auto-`/run` refuses with 409. Keep read-only proofs on read-only-looking paths.
+- **Side-effect is silently re-derived from method+path.** A path that looks mutating (`/reset`, `/delete`, `/send`) is treated as a write, even if you declared it read-only. In plain terms: the chain becomes "manual-only" — it is stored but won't auto-run, and a `/run` call returns 409. Keep read-only proofs on read-only-looking paths.
 - **JSONPath is a custom subset** (`$.a.b`, `$[0]`, `$[*].x`, `$[?(@.x != "y")]`). No recursive `..`, no slices, only `==` / `!=`. See `chains-reference.md`.
 
-### Step 3: submit and run
+### Step 4: submit and run
 
 ```bash
-# ingest  -> { "chainId": "...", "autoReplay": true, "sideEffect": "read_only" }
+# ingest  -> { "chainId": "...", "sideEffect": "read_only", ... }
+#   (a read-only chain comes back ready to auto-run; a mutating-looking one is stored manual-only)
 curl -X POST https://api.launchguard.dev/api/v1/chains \
-  -H "Authorization: Bearer lg_<key>" -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $LAUNCHGUARD_API_KEY" -H "Content-Type: application/json" \
   -d @chain.json
 
-# run once -> { "result": "vulnerable|fixed|inconclusive", "reason": "...", "matched": ..., "regression": ... }
+# run once -> { "result": "vulnerable|fixed|inconclusive", "reason": "...", "matched": ... }
 curl -X POST https://api.launchguard.dev/api/v1/chains/<chainId>/run \
-  -H "Authorization: Bearer lg_<key>" -H "Content-Type: application/json"
+  -H "Authorization: Bearer $LAUNCHGUARD_API_KEY" -H "Content-Type: application/json"
 ```
 
 Report the verdict plainly:

@@ -1,14 +1,16 @@
-# Chain authoring reference (ChainSpecV2)
+# Custom test reference — request + matcher
 
 Deep reference for the Bring Your Own Test section in SKILL.md. Read this when you need more than the single anonymous read in the 90% template: cross-tenant IDOR, multi-step preconditions, extractors, the exact assertion vocabulary, the JSONPath dialect, or the verdict-routing rules.
 
-Mental model unchanged: a chain is a Nuclei check submitted as JSON. One `exploit` step (the request), optional `precondition` steps (setup / variable extraction), and one `assertion` (the matcher block).
+Mental model unchanged: a custom test is one HTTP request plus a matcher rule, submitted as JSON. One `exploit` step (the request), optional `precondition` steps (setup / variable extraction), and one `assertion` (the matcher block).
+
+All calls need the user's API key. Per SKILL.md, store it as `LAUNCHGUARD_API_KEY` and send `-H "Authorization: Bearer $LAUNCHGUARD_API_KEY"`.
 
 ---
 
-## 1. The assertion vocabulary (only these fields exist)
+## 1. The matcher vocabulary (only these fields exist)
 
-From `ChainV2SecurityAssertion`. Anything not in this table is ignored or invalid.
+These are the only assertion fields that exist. Anything not in this table is ignored or invalid.
 
 | Field | Type | Meaning |
 |---|---|---|
@@ -37,7 +39,7 @@ NOT supported: recursive descent `..`, slices `[1:3]`, functions, and any compar
 
 ## 3. Extractors (multi-step chains)
 
-A `precondition` step can extract a value into the variable bag for a later step to reference via `{{step<order>.<as>}}` or `{{<stepId>.<as>}}`. Shape (`ChainV2Extractor`):
+A `precondition` step can extract a value into the variable bag for a later step to reference via `{{step<order>.<as>}}` or `{{<stepId>.<as>}}`. Shape:
 
 ```json
 { "as": "victimId", "from": "json", "expr": "$[0].id", "index": 0, "required": true }
@@ -81,7 +83,7 @@ Prove an anonymous PostgREST select returns rows owned by someone other than the
 }
 ```
 
-`{{auth.userId}}` resolves to the replay identity's user id. If at least one returned row has a different `user_id`, that is a proven cross-tenant leak and the verdict is `vulnerable`. An RLS denial envelope on a 2xx routes to `fixed`.
+`{{auth.userId}}` resolves to the replay identity's user id. If at least one returned row has a different `user_id`, that is a proven cross-tenant leak and the verdict is `vulnerable`. An RLS denial envelope on a 2xx routes to `fixed` (the codes `42501` and `PGRST*` above are Supabase/PostgREST RLS-denial codes — real markers that the database refused the query).
 
 ## 6. Validator rules enforced at ingest (rejection on failure)
 
@@ -103,13 +105,13 @@ Prove an anonymous PostgREST select returns rows owned by someone other than the
 | `spec.sideEffect` | a string (top-level on the spec) |
 | top-level `targetHost` | valid public DNS host AND passes the SSRF guard (private/loopback/metadata IPs rejected) |
 | top-level `severity` | one of `critical` / `high` / `medium` / `low` |
-| top-level `source` | one of `scanner` / `ai_agent` / `e2e_test` / `manual` / `import` (default `ai_agent`) |
+| top-level `source` | use `"ai_agent"` (it is optional and defaults to `ai_agent`) |
 
 Optional and passed through to the engine if present: `step.label`, `step.authRef`, `step.extract[]`, `step.request.query` / `.headers` / `.body` / `.timeoutMs`, `spec.auth`, `spec.env`, `spec.inventoryHash`, `allowedTargets.supabase` / `.api`.
 
 ## 7. Endpoint contracts
 
-Both require `Authorization: Bearer lg_<key>`. Base URL `https://api.launchguard.dev` (or `https://recon-api-dev.centrive.ai` if the key was issued on the dev backend).
+Both require `Authorization: Bearer $LAUNCHGUARD_API_KEY`. Base URL: use `https://api.launchguard.dev`. If any `/api/v1/...` call returns 404, the public edge isn't live yet — fall back to `https://recon-api-dev.centrive.ai` (LaunchGuard's own backend host, safe to call).
 
 ### POST /api/v1/chains (ingest)
 
@@ -117,7 +119,7 @@ Body: `{ title, targetHost, severity, spec, source? }`. Success `201`:
 ```json
 { "chainId": "<uuid>", "autoReplay": true, "sideEffect": "read_only" }
 ```
-A mutating re-derivation adds `"note": "Mutating chain stored as manual-only; it will not auto-run."`. Errors: `400` (validation / SSRF), `401` (auth), `500`.
+`autoReplay: true` means the chain is allowed to run. If the request looked mutating (write-style method/path), the response instead carries `"note": "Mutating chain stored as manual-only; it will not auto-run."` — meaning it was stored but won't auto-run, and a `/run` call returns 409. Errors: `400` (validation / SSRF), `401` (auth), `500`.
 
 ### POST /api/v1/chains/:id/run (re-execute)
 
@@ -126,9 +128,9 @@ No body. Success `200`:
 { "runId": "<uuid>", "result": "vulnerable|fixed|inconclusive",
   "reason": "human-readable gate reason", "matched": true, "regression": false }
 ```
-`matched` is true only on `vulnerable`. `regression` is true when a previously `fixed` chain runs `vulnerable`. Errors: `401`, `403` (chain belongs to another user), `404`, `409` (disabled, or re-derived to mutating and therefore manual-only), `500`.
+`matched` is true only on `vulnerable`. `regression` is true when a chain that previously read `fixed` now reads `vulnerable` (i.e. the bug came back). Errors: `401`, `403` (chain belongs to another user), `404`, `409` (chain is disabled, or was treated as mutating and is therefore manual-only — it won't auto-run), `500`.
 
 ## 8. Current limitations worth telling the author
 
 - Only two credential modes work without stored secrets today: anonymous (`auth: {}`) and Supabase anon (`spec.env.anonKey` signs up a fresh test account per run). Any bearer / cookie / static-token chain that needs a stored secret resolves to null and routes the run to `inconclusive`.
-- `/api/v1/*` may not yet be exposed at the public edge. If `api.launchguard.dev` rejects the route, the chain API is reachable on the dev backend at `https://recon-api-dev.centrive.ai`.
+- `/api/v1/*` may not yet be exposed at the public edge. If a call to `api.launchguard.dev` returns 404 on the route, fall back to `https://recon-api-dev.centrive.ai` (LaunchGuard's own backend host).
