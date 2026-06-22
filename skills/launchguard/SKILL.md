@@ -342,6 +342,8 @@ Response: `{ "count": N, "chains": [ { "chainId": "...", "title": "...", "lastRe
 
 The `exploit` object (`{method, path, target}`) is the **dedupe key**. If a chain already covers the same method+path+target, do NOT author a new one — instead re-run it (`POST /chains/<id>/run`) or, if the user wants a genuinely different assertion, inspect the full blueprint first with `GET /api/v1/chains/<chainId>` (returns the complete `spec`) and propose a distinct variant. Only author a new chain when nothing in the list covers the rule you're testing.
 
+If a listed chain is a duplicate or is broken, you can archive it with `DELETE /api/v1/chains/<chainId>` (success `200 { "ok": true, "archived": true }`). Archiving removes it from the list, stops it auto-running, preserves its run history, and frees its title so you can re-author cleanly under the same title if needed.
+
 ### Step 3: write the proving curl first, then translate it
 
 Always start from the plain request that proves the exploit, the thing you would paste into a terminal as an anonymous attacker. **Run it for real** and look at the response body — you need to see the actual success field it returns. Then translate it mechanically into the JSON. Minimal, valid, read-only template (the 90% case, e.g. an unauthenticated paid endpoint):
@@ -431,7 +433,7 @@ How it reads: `target: "supabase"` routes the request to `allowedTargets.supabas
 - **`spec.sideEffect` (top-level) is required** and must be a string. Use `"read_only"` for read exploits.
 - **Always include at least one positive marker** (`jsonPathsPresent` / `bodyContainsAll` / `crossTenant` / `minTotalRows`). `successStatusIn` alone can only ever yield `fixed` or `inconclusive`, never `vulnerable`.
 - **Always include `fixedStatusIn`** (e.g. `[401,403,429]`). It is documented as optional but the engine throws at run time without it (`fixedStatusIn is not iterable`), turning a valid chain into a false `inconclusive`. Never omit it.
-- **`title` must be unique on your account, and there is NO delete/disable endpoint.** Re-ingesting with a title that already exists fails (`500`), and a bad chain cannot be removed via the API, so get the spec right before you ingest, and give each chain a fresh, descriptive title. A duplicate-but-broken chain can only be cleaned up server-side by a human.
+- **`title` must be unique among your ACTIVE chains.** Re-ingesting with a title that an active chain already uses fails (`500`), so get the spec right before you ingest and give each chain a fresh, descriptive title. A bad chain is no longer permanent, though: you can `DELETE /api/v1/chains/<id>` to archive it, which removes it from the list, stops it auto-running, and frees its title to re-ingest cleanly.
 - **A 404 is never `fixed`.** Only `401` / `403` / `429` (listed in `fixedStatusIn`) or a proven-empty result count as patched, so a deleted endpoint never reads as a false fix.
 - **Side-effect is silently re-derived from method+path.** A path that looks mutating (`/reset`, `/delete`, `/send`) is treated as a write, even if you declared it read-only. In plain terms: the chain becomes "manual-only" — it is stored but won't auto-run, and a `/run` call returns 409. Keep read-only proofs on read-only-looking paths.
 - **JSONPath is a custom subset** (`$.a.b`, `$[0]`, `$[*].x`, `$[?(@.x != "y")]`). No recursive `..`, no slices, only `==` / `!=`. See `chains-reference.md`.

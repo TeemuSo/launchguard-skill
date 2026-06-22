@@ -148,6 +148,14 @@ No body. Success `200`:
 ```
 `matched` is true only on `vulnerable`. `regression` is true when a chain that previously read `fixed` now reads `vulnerable` (i.e. the bug came back). Errors: `401`, `403` (chain belongs to another user), `404`, `409` (chain is disabled, or was treated as mutating and is therefore manual-only — it won't auto-run), `500`.
 
+### DELETE /api/v1/chains/:id (archive)
+
+Soft-deletes (archives) a chain. This is a reversible-on-the-server archive, not a hard delete: the chain disappears from `GET /api/v1/chains`, stops auto-running on deploys, and its run history is preserved. Archiving also frees the title, so the same title can be re-ingested afterward. Owner-scoped. Success `200`:
+```json
+{ "ok": true, "chainId": "<id>", "archived": true }
+```
+A `404` (`{ "error": "chain not found" }`) means the chain is missing, belongs to another user, or is already archived. Use this to clean up a duplicate or broken chain instead of leaving it stored. Errors: `401`, `404`, `500`.
+
 ## 8. Current limitations worth telling the author
 
 - Only two credential modes work without stored secrets today: anonymous (`auth: {}`) and Supabase anon (`spec.env.anonKey` signs up a fresh test account per run). Any bearer / cookie / static-token chain that needs a stored secret resolves to null and routes the run to `inconclusive`.
