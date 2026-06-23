@@ -23,6 +23,8 @@ After both, you get a clear checklist of what's verified vs what still needs att
 
 > **Before you call anything a "finding" — from the scan OR a custom test — read `methodology.md` in this skill directory.** It is the pentester judgment layer: an ordered procedure (threat-model → reachability-from-fresh-state → enumerability → escalation → honest severity → intended-public filter → validation gate) that turns raw "the endpoint answered 200" into a defensible finding, and filters out the false positives a non-expert would otherwise ship. Load it for any "check my app" / "is this secure" / "find my vulnerabilities" request.
 
+> **Authoring a FUNCTIONAL test instead (prove a critical flow still WORKS, not that it's exploitable)? Read `functional-methodology.md` in this skill directory.** It is the functional twin of `methodology.md`: how to pick deploy-gate regression chains, the mandatory two-gate authoring pattern (prove you reached the state, then assert the outcome), anti-flake rules, and the `intent:"functional"` verdict mapping (PASS = working/green, FAIL = broken/red, ERROR = inconclusive). Load it whenever the user wants to "watch that signup/checkout/dashboard still works on every deploy" rather than find a vulnerability.
+
 ---
 
 ## What the external scan verifies
@@ -260,8 +262,8 @@ Connecting alone is enough to show "Connected". But the moment that makes Launch
    - a tenant-ownership / IDOR boundary (user A cannot read user B's record),
    - a paywall (a Pro-only route or resource served to an unpaid request),
    - an admin-only or internal route reachable by a guest.
-2. **Translate that rule into a read-only custom test** (see "Bring Your Own Test" below) and submit it. Choose a positive marker that proves the rule is actually broken — a foreign row's owner id, a completion/job id, a paid resource field.
-3. Report the verdict. The chain is now watched and re-run on every deploy.
+2. **Translate that rule into a read-only custom test** (see "Bring Your Own Test" below) and submit it **as a Guard** — set `"watched": true` in the ingest body. This flow is explicitly about establishing ongoing protection, so it is the one place you watch by default. Choose a positive marker that proves the rule is actually broken — a foreign row's owner id, a completion/job id, a paid resource field.
+3. Report the verdict. Because you submitted it `watched: true`, the chain is now a Guard: re-run on every deploy with regression alerts.
 
 Because the app is now **monitored**, a chain against it (read-only OR mutating) is allowed **without** the separate DNS / well-known domain proof: adding the app to the account is the ownership signal (trust-the-owner). Verification in the next section is only needed for a host that is NOT in the user's account. Keep this first test read-only, minimal (one ingest + one run), and tailored, a test that feels made for their app, not a generic check.
 
@@ -272,6 +274,8 @@ Because the app is now **monitored**, a chain against it (read-only OR mutating)
 Use this when the user wants to *prove* a specific exposure, not just scan. Triggers: "prove a stranger can run up my bill", "show this is actually exploitable", "write a test that reproduces this", "author a chain", or anything that names a `chain` or a Bring Your Own Test.
 
 > **READ `methodology.md` in this skill directory BEFORE authoring any test or calling anything a "finding".** The chain *format* below is mechanics; `methodology.md` is the *judgment* — the ordered pentester procedure (threat-model from intent → reachability from a fresh anonymous state → enumerability/id-confidentiality → escalation chaining → stateful preconditions → honest CVSS → false-positive/intended-public filter → a validation gate before you report). It is what stops a non-expert's agent from shipping false positives (flagging intended-public `/api/stats`) or non-weaponizable "findings" (an IDOR on an id the test created itself). Apply it to the free-scan results too, not just custom tests.
+
+> **Want to prove a flow WORKS, not that it's exploitable?** That is a *functional* test (a Playwright **script** chain with `intent:"functional"`, where PASS = working/green and FAIL = broken/red), not the HTTP request-plus-matcher chain documented below. Read `functional-methodology.md` in this skill directory for the two-gate authoring pattern and the functional verdict mapping. The HTTP-chain mechanics in this section are for security exploits; functional regression chains are authored as scripts and are the right tool for "watch that my signup / checkout / dashboard still works on every deploy."
 
 **Mental model:** a custom test is ONE HTTP request plus a rule (a "matcher") that says what "exploited" looks like versus what "safe/patched" looks like. You author it as JSON, submit it to LaunchGuard, and get back a verdict. That's the whole idea — no other concepts required.
 
@@ -285,6 +289,17 @@ A chain is **one reproducible exploit** that LaunchGuard stores and re-runs on d
 > **Never accept an `inconclusive`.** It does not mean "we don't know." It means you haven't finished writing the test. The fix is always the same: **READ the actual response (status + body) you got, decide what the endpoint *should* do, and encode that expectation into the matcher** (`successStatusIn` / `fixedStatusIn` / a positive marker) so the run routes deterministically to PASS or FAIL. Re-run until it resolves. The ONLY time you archive instead of fix is when the test is genuinely unassertable — the engine could not even issue the request, so there is no response to read (e.g. a cross-tenant chain that dies at `no_credential_resolver` before any HTTP call). "I didn't define the expectation" is never that case.
 
 This is a real, opt-in capability, separate from the free scan. It runs only against a domain the user has **proven they own**, sends the **minimum** requests to prove the point, and in the read-only form below changes nothing on the target.
+
+### Proof vs Guard — does this test re-run on every deploy?
+
+Every custom test is one of two classes, set by the top-level `watched` boolean at ingest (and changeable later via PATCH):
+
+- **Proof** (`watched: false`, **the default**) — a one-shot. You author it, run it once, report the verdict, and it stays as stored evidence. It does **not** re-run on deploy. This is the right class for the many exploit proofs you author while triaging a scan ("show me this is exploitable right now"). Authoring ten proofs during an audit should NOT silently fill the user's watched suite with ten auto-running tests.
+- **Guard** (`watched: true`) — joins the deploy-replay suite. On every detected deploy LaunchGuard re-runs it and alerts on regression (a `fixed` chain that comes back `vulnerable`). Reserve this for the handful of rules the user genuinely wants watched forever.
+
+**Default to Proof.** Only set `watched: true` when the user's intent is explicitly ongoing protection — they said "watch this on every deploy", you're in the Connect flow, or you/they decide a specific proof is worth guarding. A user can promote a Proof to a Guard (or demote) anytime from the custom-tests page or via `PATCH /api/v1/chains/<id>` with `{ "watched": true|false }`.
+
+`watched` is **orthogonal to side-effect**: a mutation chain never auto-runs regardless (the safety gate is separate), so marking a mutation `watched: true` does not make it fire on deploy — only read-only Guards auto-run.
 
 ### The format: one request plus a matcher, submitted as JSON
 
@@ -300,6 +315,7 @@ A custom test is one HTTP request plus a matcher block that says "exploited look
 | every JSONPath must resolve to a value | `assertion.jsonPathsPresent` | non-null marker |
 | pull a value out for a later step | `steps[].extract[]` | only needed for multi-step chains |
 | severity | top-level `severity` | `critical` \| `high` \| `medium` \| `low` |
+| watch it on every deploy (Guard) vs one-shot (Proof) | top-level `watched` | boolean, **defaults `false` (Proof)**. See "Proof vs Guard" below |
 
 That is the whole matcher vocabulary. Do NOT invent `bodyContainsAny`, `statusEquals`, `regex`, etc.
 
@@ -362,6 +378,7 @@ Always start from the plain request that proves the exploit, the thing you would
   "targetHost": "sandbox.example.com",
   "severity": "high",
   "source": "ai_agent",
+  "watched": false,
   "spec": {
     "version": 2,
     "steps": [
@@ -391,6 +408,7 @@ Always start from the plain request that proves the exploit, the thing you would
 Notes on the template:
 - `"version": 2` is a required field — just set it to 2.
 - `"source": "ai_agent"` — use that value.
+- **`"watched": false` makes this a Proof** (one-shot, the default — see "Proof vs Guard" above). Leave it `false` for an exploit you're just proving now; set it `true` only when the user wants this re-run on every deploy (a Guard).
 - **`"jsonPathsPresent": ["$.id"]` is a PLACEHOLDER.** You MUST replace `$.id` with the actual success field you saw when you ran the proving curl in this step. Real endpoints often return a different field (e.g. `/api/checkout` returns `checkoutUrl`, not `id`). Copying `$.id` blindly makes a genuinely vulnerable endpoint come back `inconclusive` because the marker never matches.
 
 Pick a positive marker that proves the **paid work actually ran**: a completion id, a queued job id, a provider response field — whatever field you actually observed. That marker is your `jsonPathsPresent` (a field that must exist) or `bodyContainsAll` (literal substrings).
@@ -413,6 +431,7 @@ You need the target's **public** Supabase anon key + project ref — both client
   "targetHost": "sandbox.example.com",
   "severity": "critical",
   "source": "ai_agent",
+  "watched": false,
   "spec": {
     "version": 2,
     "steps": [
@@ -477,7 +496,7 @@ curl -X POST https://api.launchguard.dev/api/v1/chains/<chainId>/run \
   -H "Authorization: Bearer $LAUNCHGUARD_API_KEY" -H "Content-Type: application/json"
 ```
 
-The `/run` response also carries `matched` (true only on `vulnerable`) and `regression` (true when a chain that previously read `fixed` now reads `vulnerable`, i.e. a fixed bug came back). On every later deploy the chain re-runs; `regression: true` is the alarm that a protection you'd verified has broken again.
+The `/run` response also carries `matched` (true only on `vulnerable`) and `regression` (true when a chain that previously read `fixed` now reads `vulnerable`, i.e. a fixed bug came back). **If you ingested it as a Guard (`watched: true`), it re-runs on every later deploy** and `regression: true` is the alarm that a protection you'd verified has broken again. A Proof (`watched: false`, the default) does NOT re-run on deploy — it stays as the stored verdict from this run until you (or the user) promote it to a Guard.
 
 Report the verdict plainly:
 - `vulnerable` plus the `reason` (e.g. `exploit_reproduced: assertions passed`) means the paid path is reachable unauthenticated. Show the user the marker that proved it.
@@ -487,10 +506,11 @@ Report the verdict plainly:
 ### Managing the test suite via the API
 
 Your `lg_` key gives you the FULL custom-test lifecycle on a domain's suite without a human:
-- **Create:** ingest a new chain with `POST /api/v1/chains`.
-- **List / inspect:** `GET /api/v1/chains?targetHost=<host>` then `GET /api/v1/chains/<id>` for any blueprint. Add `?includeArchived=true` to also list archived chains (each row carries `archived` / `archivedAt`) when you need to find one to restore.
+- **Create:** ingest a new chain with `POST /api/v1/chains`. Defaults to a Proof (`watched: false`); pass `"watched": true` to ingest it directly as a Guard.
+- **List / inspect:** `GET /api/v1/chains?targetHost=<host>` then `GET /api/v1/chains/<id>` for any blueprint. Each row carries `watched` (Guard vs Proof). Add `?includeArchived=true` to also list archived chains (each row carries `archived` / `archivedAt`) when you need to find one to restore.
 - **De-duplicate:** compare each `exploit` `{method,path,target}` key; archive duplicates.
-- **Modify in place:** `PATCH /api/v1/chains/<id>` with `{ title?, severity?, spec? }` (at least one). Changing the `spec` re-validates it and re-derives the side-effect, so flipping a method to a non-GET can turn the chain into a mutation. Use this to fix or evolve a test instead of archive-then-reingest.
+- **Promote / demote (watch intent):** `PATCH /api/v1/chains/<id>` with `{ "watched": true }` to make a Proof a Guard (re-runs on deploy), or `{ "watched": false }` to stop watching it. This is how you keep the watched suite curated instead of letting every read-only proof auto-run.
+- **Modify in place:** `PATCH /api/v1/chains/<id>` with `{ title?, severity?, spec?, watched? }` (at least one). Changing the `spec` re-validates it and re-derives the side-effect, so flipping a method to a non-GET can turn the chain into a mutation. Use this to fix or evolve a test instead of archive-then-reingest.
 - **Run any chain:** `POST /api/v1/chains/<id>/run`. Read-only chains run freely and return a verdict. A mutation chain runs only with body `{ "confirmMutation": true }` against a domain the user monitors (it fires real side effects); see "Running mutation tests (explicit confirmation)" below.
 - **Archive / restore:** `DELETE /api/v1/chains/<id>` archives a duplicate, broken, or obsolete test (`200 {"ok":true,"archived":true}`), and `POST /api/v1/chains/<id>/restore` brings it back (`200 {"ok":true,"restored":true}`). Archiving is reversible: list archived ones with `GET /api/v1/chains?includeArchived=true` to find the id, then restore. A restore returns `409 { "titleCollision": true }` if an active chain re-used that title after the archive (rename or archive that one first). The same calls work whether you authored the chain or not, as long as it is your account's.
 

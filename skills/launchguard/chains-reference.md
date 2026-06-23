@@ -8,6 +8,25 @@ All calls need the user's API key. Per SKILL.md, store it as `LAUNCHGUARD_API_KE
 
 ---
 
+## 0. Proof vs Guard — `watched` (applies to EVERY chain, HTTP or script)
+
+Every chain — an HTTP exploit chain OR a functional script chain — is one of two classes, set by the top-level `watched` boolean at ingest and changeable later via PATCH:
+
+- **Proof** (`watched: false`, **the default**) — a one-shot. Author it, run it once, report the verdict; it stays as stored evidence and does **not** re-run on deploy. This is the right class for the many exploit proofs you author while triaging a scan ("show me this is exploitable right now"). Authoring ten proofs during an audit should NOT silently fill the user's watched suite with ten auto-running tests.
+- **Guard** (`watched: true`) — joins the deploy-replay suite. On every detected deploy LaunchGuard re-runs it and alerts on regression (a `fixed` chain that comes back `vulnerable`). Reserve this for the rules the user genuinely wants watched forever.
+
+**Default to Proof.** Set `watched: true` only when the intent is explicitly ongoing protection — the user said "watch this on every deploy", you're in the Connect flow, or you/they decide a specific proof is worth guarding. (Functional regression chains are the common case where a Guard is the goal — but still confirm a clean, non-flaky green before you promote; see `functional-methodology.md`.)
+
+Set it two ways:
+- **At authoring time:** include `"watched": true` (or omit / `false` for a Proof) in the `POST /api/v1/chains` ingest body.
+- **Later, via the API:** `PATCH /api/v1/chains/<id>` with `{ "watched": true }` promotes a Proof to a Guard, `{ "watched": false }` demotes it. The user can also toggle it from the custom-tests page in the UI.
+
+Every list/get row carries `watched` so you can tell Guards from Proofs.
+
+**`watched` is orthogonal to side-effect.** A `mutation` chain never auto-runs regardless (the separate confirmation gate in §7 still applies), so marking a mutation `watched: true` does NOT make it fire on deploy — only read-only Guards (and functional script Guards) auto-run.
+
+---
+
 ## 1. The matcher vocabulary (only these fields exist)
 
 These are the only assertion fields that exist. Anything not in this table is ignored or invalid.
@@ -133,7 +152,7 @@ Optional `?targetHost=<host>` filter (normalized the same way ingest derives `ho
   { "chainId": "<uuid>", "targetHost": "sandbox.example.com", "title": "...",
     "severity": "high", "source": "ai_agent", "sideEffect": "read_only",
     "status": "active", "lastResult": "vulnerable", "lastTestedAt": "...",
-    "enabled": true, "autoReplay": true, "createdAt": "...",
+    "enabled": true, "autoReplay": true, "watched": false, "createdAt": "...",
     "archived": false, "archivedAt": null,
     "exploit": { "method": "POST", "path": "/api/chat", "target": "primary" } }
 ] }
@@ -146,18 +165,18 @@ Returns a single chain end-to-end, including the complete `spec` (steps + assert
 
 ### POST /api/v1/chains (ingest)
 
-Body: `{ title, targetHost, severity, spec, source? }`. Success `201`:
+Body: `{ title, targetHost, severity, spec, source?, watched? }`. `watched` defaults to `false` (a Proof — one-shot, no deploy re-run); pass `"watched": true` to ingest it directly as a Guard (re-runs on every deploy). See §0. Success `201`:
 ```json
-{ "chainId": "<uuid>", "autoReplay": true, "sideEffect": "read_only" }
+{ "chainId": "<uuid>", "autoReplay": true, "sideEffect": "read_only", "watched": false }
 ```
 `autoReplay: true` means the chain is allowed to run. If the request looked mutating (write-style method/path), the response instead carries `"note": "Mutating chain stored as manual-only; it will not auto-run."` — meaning it was stored but won't auto-run, and a `/run` call returns 409. Errors: `400` (validation / SSRF), `401` (auth), `500`.
 
 ### PATCH /api/v1/chains/:id (modify)
 
-Owner-scoped in-place edit. Body: `{ title?, severity?, spec? }`, supply at least one. When `spec` changes it is re-validated (same rules as ingest, §6) and the side-effect is re-derived, so changing a method to a non-GET can flip the chain to `mutation` (manual-only). `title` must stay unique among your ACTIVE chains; a rename that collides with another active chain returns `409`. Use this to fix or evolve a test in place instead of archive-then-reingest. Success `200`:
+Owner-scoped in-place edit. Body: `{ title?, severity?, spec?, watched? }`, supply at least one. `{ "watched": true }` promotes a Proof to a Guard (re-runs on deploy); `{ "watched": false }` demotes it back to a one-shot — this is how you curate the watched suite without re-ingesting (see §0). When `spec` changes it is re-validated (same rules as ingest, §6) and the side-effect is re-derived, so changing a method to a non-GET can flip the chain to `mutation` (manual-only). `title` must stay unique among your ACTIVE chains; a rename that collides with another active chain returns `409`. Use this to fix or evolve a test in place instead of archive-then-reingest. Success `200`:
 ```json
 { "chainId": "<uuid>", "title": "...", "severity": "high",
-  "sideEffect": "read_only", "autoReplay": true, "updatedAt": "..." }
+  "sideEffect": "read_only", "autoReplay": true, "watched": false, "updatedAt": "..." }
 ```
 Errors: `400` (validation / SSRF / no fields), `401`, `403` (chain belongs to another user), `404`, `409` (title collision with another active chain), `500`.
 
