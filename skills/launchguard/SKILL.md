@@ -243,10 +243,12 @@ Every chain row carries `lastResult`, the outcome of its most recent run:
 
 When the user says "clean up / manage / triage / dedupe / prune / review my tests" (or you're tidying a suite you didn't author), this is decision logic, not authoring. List the suite (`GET /api/v1/chains` for all apps, or `?targetHost=<host>` for one), then apply this checklist **per chain**. When unsure, KEEP — archiving real coverage is the expensive mistake.
 
+The default list is already the **ACTIVE set** — archived chains are excluded, so you're triaging only live coverage; add `?includeArchived=true` to also see archived rows (each carries `archived: true`), e.g. to find one to restore. And you can run a whole cleanup pass directly against `https://recon-api-dev.centrive.ai` — the public edge 404s `/api/v1/*`, so once any call falls back to the dev host, just stay there for the rest of the pass.
+
 **Archive a chain ONLY if one of these is true:**
 - **(a) Exact duplicate** of another *custom* chain — same `{method, path, target}` dedupe key, respecting the script-chain carve-out in Step 2.5 (dedupe script/Playwright chains by title or by diffing `spec.script`, **never** by their constant `(PLAYWRIGHT, "(script chain)", primary)` summary). Keep the better-titled / more-recently-passing one; archive the redundant twin.
 - **(b) Structurally unassertable** — the matcher has no positive marker (`jsonPathsPresent` / `bodyContainsAll` / `crossTenant` / `minTotalRows`), so the chain can only ever route to `fixed` or `inconclusive` and can NEVER reach `vulnerable`. It cannot prove the thing it claims to test. (Confirm by reading the `spec.assertion` via `GET /api/v1/chains/<id>` — don't infer from the row.)
-- **(c) Obsolete** — points at a dead/placeholder host or an endpoint that no longer exists (the path was removed). Verify before archiving: an endpoint that returns `404` to YOUR probe is not automatically "removed" — confirm the route is genuinely gone, not just denying you.
+- **(c) Obsolete** — points at a dead/placeholder host or an endpoint that no longer exists (the path was removed). Verify before archiving, inside the **minimum-requests boundary** (one confirming probe, not a sweep): re-run the chain (`POST /chains/<id>/run`) or issue the single proving request by hand and read what comes back. Honest caveat: **a `404` to your probe is NOT proof the route was removed** — a live route can 404 you because it gates anonymous callers, wants a param/slug you didn't supply, or sits behind auth (denying you, not gone). Treat it obsolete only when you can tell removed-from-the-app apart from denying-you (the host itself is dead/placeholder, or sibling routes answer while this exact path is a framework-level not-found). Can't tell? KEEP, and flag the path for a human eyeball rather than archiving on a bare 404.
 
 **NEVER archive (these look broken but are healthy):**
 - A **mutation chain that has merely never run** (`lastResult:null` on a non-GET). Mutations never auto-run by design — `null` is the expected resting state, not a defect. Mark it "mutation, fires real side effects, run only on explicit request."
@@ -282,7 +284,9 @@ That is the whole matcher vocabulary. Do NOT invent `bodyContainsAny`, `statusEq
 
 ### Step 1: Get the user's API key
 
-Before anything else, you need a LaunchGuard API key. **Ask the user to paste theirs** (their LaunchGuard account → Developer / API keys at launchguard.dev). The key starts `lg_` followed by ~40 chars — if a pasted value doesn't start with `lg_`, ask again before spending a request. Never mint or guess a key. Store it and send it on EVERY chain call below; without it every call 401s.
+Before anything else, you need a LaunchGuard API key. It is **per-account**, minted by the user under their LaunchGuard account → **Developer / API keys** at launchguard.dev — it is NOT in the app's frontend env, code, or `.env` files, so don't go looking for it there. **Ask the user to paste theirs.** The key is `lg_` + ~40 chars. Reject anything else before spending a request: a value that doesn't start `lg_` is not the key, and a value starting **`lg_scan_`** is a scan-token SECRET (a per-scan credential), NOT the Developer API key — the real key has no `scan_` segment. Never mint or guess a key. Store it and send it on EVERY chain call below; without it every call 401s.
+
+**Confirm you actually hold a valid `lg_`+~40-char key BEFORE the first chain call.** If the key is absent AND you cannot ask a human (an unattended / agentic run), STOP: report the missing Developer API key as the single blocker and do NOT proceed to scan or author anything. There is no fallback that recovers a key the user never gave you — proceeding just burns to a wall of 401s.
 
 ```bash
 export LAUNCHGUARD_API_KEY="<paste the key the user gave you>"   # then: -H "Authorization: Bearer $LAUNCHGUARD_API_KEY"
@@ -425,6 +429,8 @@ Validation note: because the engine signs up its OWN throwaway account for this 
 
 Two Supabase read styles, pick by the question: to prove **"a logged-in user can cross tenant boundaries"**, use `spec.env.anonKey` (the engine signs up a fresh user, as above). To prove the simpler **"this table is readable by an anonymous client at all"**, send a `target: "supabase"` GET to `/rest/v1/<table>` with the target's public anon key in the request headers (`apikey` AND `authorization: Bearer <key>`, plus `"Prefer": "count=exact"`) and assert on `minTotalRows: 1`. This style works with EITHER a legacy `eyJ...` JWT or a new `sb_publishable_...` key, and it does NOT require Supabase Auth — so it is the correct cross-tenant/exposure test for Clerk and other non-Supabase-Auth apps. Both styles are valid; the first tests RLS for authenticated users (Supabase-Auth only), the second tests anonymous exposure (any app).
 
+> **API arrays count too — the most common real vibe-coder mass-exposure.** Anonymous mass-exposure is NOT only a PostgREST/`content-range` thing. The everyday case is an **app route returning a JSON array of sensitive records without auth** (e.g. `GET /api/widget/config?slug=x` → an array of names + phone numbers) — a first-class anon mass-exposure finding, rendered as the same structured "rows" evidence card on the dashboard. Assert it with **`jsonPathsPresent` on a sensitive field** (e.g. `["$[0].phone"]`), optionally plus `bodyContainsAll` on a known value — **NOT `minTotalRows`** (it needs a PostgREST `content-range` header a plain API array won't carry → it never fires → false `inconclusive`). Worked template: `chains-reference.md` §5.1.
+
 ### Footguns that fail authors most
 
 These are the high-stakes ones — the **judgment and safety** rules. The exhaustive mechanical catalog (host-normalization byte-equality, the `target` enum, the JSONPath subset grammar, the `minTotalRows` `Prefer: count=exact` header, RPC zero-arg rule, redirect-routing limitation, title-uniqueness/`500`) is in **`chains-reference.md` §1–§8** — read it before authoring anything past the two templates.
@@ -457,6 +463,8 @@ Report the verdict plainly:
 - `vulnerable` plus the `reason` (e.g. `exploit_reproduced: assertions passed`) means the paid path is reachable unauthenticated. Show the user the marker that proved it.
 - `fixed` means it is properly gated (401/403/429, or a proven-empty result, e.g. `access_denied: HTTP 401` or `exploit_absent: total 0 < 1`). Say so clearly.
 - `inconclusive` means the proof was ambiguous (404/5xx/unreachable/engine error). Do not claim either way.
+
+**Pointing the user at the dashboard:** identify the finding by its `targetHost` + `chainId` (both from the ingest/run response) and tell the user to open it from their LaunchGuard dashboard. Do NOT promise or construct a `https://launchguard.dev/app/<id>` link: an `lg_` API key cannot resolve that `<id>` — chain rows carry no `appId`, and `/api/v1/context` is human-session-only. (The `dashboardUrl` in the Connect response is the one exception — there the API hands you the URL; you never build it yourself.)
 
 ### Managing the test suite via the API
 

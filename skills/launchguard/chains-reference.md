@@ -116,6 +116,45 @@ Prove an anonymous PostgREST select returns rows owned by someone other than the
 
 `{{auth.userId}}` resolves to the replay identity's user id. If at least one returned row has a different `user_id`, that is a proven cross-tenant leak and the verdict is `vulnerable`. An RLS denial envelope on a 2xx routes to `fixed` (the codes `42501` and `PGRST*` above are Supabase/PostgREST RLS-denial codes — real markers that the database refused the query).
 
+## 5.1. Worked example: anonymous JSON-array API mass-exposure
+
+The most common real vibe-coder exposure is NOT a raw PostgREST table — it's an **app route that returns a JSON array of sensitive records without auth**: a `GET /api/widget/config?slug=acme` that answers an anonymous request with `[{ "name": "...", "phone": "..." }, ...]`. This is a first-class anonymous mass-exposure finding (names, emails, phone numbers, internal ids leaking to any stranger), and LaunchGuard renders it as the same structured "rows" evidence card on the dashboard as a PostgREST leak.
+
+The trap: do NOT reach for `minTotalRows`. That marker reads a PostgREST `content-range` total header, which a plain application route does not send — so the run lands in `ambiguous_2xx`/`inconclusive` and a genuinely exposed endpoint looks like a non-result. Assert on the **shape of the array itself** instead:
+
+```json
+{
+  "title": "Anonymous request returns an array of customer phone numbers",
+  "targetHost": "sandbox.example.com",
+  "severity": "high",
+  "source": "ai_agent",
+  "watched": false,
+  "spec": {
+    "version": 2,
+    "steps": [
+      {
+        "order": 1, "id": "exploit", "label": "GET the config route anonymously",
+        "role": "exploit", "sideEffect": "read_only",
+        "request": { "method": "GET", "target": "primary", "path": "/api/widget/config?slug=acme" }
+      }
+    ],
+    "assertion": {
+      "successStatusIn": [200],
+      "fixedStatusIn": [401, 403, 404],
+      "jsonPathsPresent": ["$[0].phone"],
+      "contentTypeIncludes": "application/json"
+    },
+    "auth": {},
+    "sideEffect": "read_only",
+    "allowedTargets": { "primary": "sandbox.example.com" }
+  }
+}
+```
+
+- The positive marker is **`jsonPathsPresent` on a sensitive field of the first element** (`$[0].phone`, `$[0].email`, `$[*].ssn`, etc.) — proof the array exists AND carries the sensitive field. Optionally add `bodyContainsAll` with a real value you saw (a known customer name) to bind the assertion harder.
+- `fixedStatusIn` here can include `404` only if the patched behavior is genuinely a hard not-found for the anonymous caller — but remember a `404` is normally NOT a clean fix (§4); prefer `[401,403]` when the gated app actually denies. The win you want from a patch is a `401`/`403`, or the array coming back empty (no `$[0]`, so the marker can't resolve → `fixed` by clean-empty).
+- This is `target: "primary"` (the app's own host), not `target: "supabase"` — it's an application route, not a PostgREST query.
+
 ## 6. Validator rules enforced at ingest (rejection on failure)
 
 | Location | Rule |
