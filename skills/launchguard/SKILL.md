@@ -8,6 +8,8 @@ description: |
   RLS, exposed tables, API auth, or leaked secrets. Also use after deploying or before launch.
   Also use to "connect to LaunchGuard", "connect my Claude Code", or "watch this app on every
   deploy" — a lightweight link followed by one tailored, business-logic test.
+  Also use to "clean up / manage / triage / dedupe / prune / review my LaunchGuard tests",
+  "tidy my custom tests", "which guards can I archive", or to curate an existing chain suite.
   Combines external verification (live scan) with code review (security patterns).
 ---
 
@@ -31,38 +33,10 @@ After both, you get a clear checklist of what's verified vs what still needs att
 
 The scan hits your live, deployed app and produces evidence for each check:
 
-### Database layer (Supabase/Firebase)
-| Check | What it proves |
-|-------|---------------|
-| Table read access | Whether anonymous users can SELECT from each table (+ row count if exposed) |
-| Table write access | Whether anonymous users can INSERT/UPDATE/DELETE (tested via rollback transactions) |
-| RLS enforcement | Whether row-level security is actually blocking queries, not just enabled |
-| Service role key exposure | Whether the admin key is leaked in client-side JavaScript |
-| Storage bucket access | Whether buckets are public, and whether files are listable |
-| RPC function access | Whether database functions are callable without auth |
-| Edge function access | Whether serverless functions respond without auth |
-| Hidden table discovery | Whether tables not referenced in code are still accessible (PGRST205 — a PostgREST table-probing code) |
-
-### API layer (endpoints)
-| Check | What it proves |
-|-------|---------------|
-| Endpoint authentication | Whether API routes respond to unauthenticated requests |
-| Response data exposure | What data endpoints return without auth (previews response bodies) |
-| Cost-sinkhole risk | Whether expensive operations (AI, email, compute) are callable without auth |
-| API spec exposure | Whether OpenAPI/Swagger specs are publicly accessible |
-
-### Secrets layer
-| Check | What it proves |
-|-------|---------------|
-| JS bundle secrets | Whether API keys, tokens, or credentials are embedded in client JavaScript |
-| Service role keys | Whether Supabase/Firebase admin keys are in client code |
-| Environment variable leaks | Whether server-side secrets made it into the client bundle |
-
-### Infrastructure layer
-| Check | What it proves |
-|-------|---------------|
-| Subdomain exposure | What subdomains exist and are alive (attack surface width) |
-| Technology fingerprint | What stack is running (to contextualize findings) |
+- **Database (Supabase/Firebase):** anonymous table read (SELECT + row count) and write (INSERT/UPDATE/DELETE via rollback transactions); whether RLS is actually blocking, not just enabled; service-role key leaked in client JS; public/listable storage buckets; callable-without-auth RPC and edge functions; hidden tables accessible but not in code (PGRST205).
+- **API endpoints:** routes that answer unauthenticated; what data they return without auth (body previews); cost-sinkhole risk (AI/email/compute callable unauth); publicly-exposed OpenAPI/Swagger specs.
+- **Secrets:** API keys/tokens/credentials, service-role keys, and server-side env vars embedded in the client JS bundle.
+- **Infrastructure:** live subdomains (attack-surface width) and the detected tech stack (to contextualize findings).
 
 ---
 
@@ -70,30 +44,9 @@ The scan hits your live, deployed app and produces evidence for each check:
 
 After the scan, review the user's codebase for these patterns:
 
-### Supabase projects
-| Check | What to look for |
-|-------|-----------------|
-| RLS enabled on all tables | `ALTER TABLE ... ENABLE ROW LEVEL SECURITY` in migrations |
-| Policies exist for each table | `CREATE POLICY` statements matching the app's auth model |
-| No service role key in client code | Only `NEXT_PUBLIC_SUPABASE_ANON_KEY` exposed, never the service role |
-| Server-side operations use service role | Admin operations go through API routes, not client-side |
-| Storage policies defined | Bucket-level and object-level policies in migrations |
-
-### API routes
-| Check | What to look for |
-|-------|-----------------|
-| Auth middleware on sensitive routes | Every route that reads/writes user data checks authentication |
-| Rate limiting on expensive operations | AI, email, SMS, compute routes have request limits |
-| No secrets in client bundles | All API keys are in `.env` (not `.env.local` with `NEXT_PUBLIC_` prefix) |
-| Input validation | Request bodies are validated/typed before processing |
-| Error messages don't leak info | Errors return generic messages, not stack traces or internal state |
-
-### Environment & deployment
-| Check | What to look for |
-|-------|-----------------|
-| `.env` not committed to git | Check `.gitignore` includes `.env*` |
-| Secrets in hosting env vars | Sensitive keys in Vercel/Netlify environment config, not in code |
-| No debug endpoints in production | Dev-only routes are removed or gated |
+- **Supabase:** RLS enabled on every table (`ALTER TABLE ... ENABLE ROW LEVEL SECURITY` in migrations); a `CREATE POLICY` per table matching the auth model; service-role key never in client code (only `NEXT_PUBLIC_SUPABASE_ANON_KEY` exposed); admin operations go through API routes, not the client; storage bucket/object policies defined.
+- **API routes:** auth middleware on every route that reads/writes user data; rate limiting on expensive (AI/email/SMS/compute) routes; no secrets in client bundles (keys in `.env`, never `NEXT_PUBLIC_`-prefixed); request bodies validated/typed; errors return generic messages, not stack traces or internal state.
+- **Environment & deployment:** `.env*` in `.gitignore`; secrets in the host's env config (Vercel/Netlify), not in code; no debug/dev-only endpoints left ungated in production.
 
 ---
 
@@ -163,37 +116,13 @@ Full report: https://www.launchguard.dev/scan/abc-123
 
 Use ✓ for verified-safe, ✗ for issues found. This gives the user a clear picture of coverage.
 
-**Severity** (use scan's own field when present):
-- **Critical:** Service role key exposed, tables writable without auth, unprotected AI endpoints
-- **High:** Tables readable (with data), public storage with files, unprotected email/SMS
-- **Medium:** Empty public tables, callable RPCs, public storage empty
-- **Low:** Informational, best practice recommendations
+**Severity** (use the scan's own field when present): **Critical** = service-role key exposed, tables writable unauth, unprotected AI endpoints. **High** = tables readable with data, public storage with files, unprotected email/SMS. **Medium** = empty public tables, callable RPCs, empty public storage. **Low** = informational / best-practice.
 
-**If 0 findings:** Show the checklist with all ✓. Clarify this verifies the external surface — internal logic bugs and authenticated-user exploits are not tested. Still valuable: it proves your data layer and API perimeter are solid.
+**If 0 findings:** show the checklist all ✓. Clarify this verifies the external surface — internal logic bugs and authenticated-user exploits are NOT tested — but it does prove the data layer and API perimeter are solid.
 
 ### Step 5: Code review
 
-After presenting scan results, review the codebase against the code verification checklist above. READ the actual project files — migrations, middleware, env config, API routes.
-
-Present as a second checklist:
-
-```
-## Code Verification (project review)
-
-### Supabase security
-- ✓ RLS enabled on all tables (found in migration 003_enable_rls.sql)
-- ✗ `user_settings` table has no RLS policy — likely missed
-- ✓ Service role key only in .env (not .env.local)
-
-### API route protection  
-- ✓ /api/chat has auth middleware (src/middleware.ts line 23)
-- ✗ /api/webhooks/stripe has no auth — needs webhook signature verification
-- ✓ Rate limiting configured (10 req/min on AI routes)
-
-### Environment
-- ✓ .env in .gitignore
-- ✓ No NEXT_PUBLIC_ prefix on secret keys
-```
+After presenting scan results, review the codebase against the code verification checklist above. READ the actual project files — migrations, middleware, env config, API routes. Present as a second `## Code Verification (project review)` checklist in the same ✓/✗ format, grouped by Supabase / API route / Environment, and **cite the file + line** for each item (e.g. `✓ RLS enabled (migration 003_enable_rls.sql)`, `✗ /api/webhooks/stripe has no signature verification (src/app/api/webhooks/stripe/route.ts)`). The file citation is what makes it actionable.
 
 ### Step 6: Fix issues
 
@@ -249,9 +178,9 @@ curl -s -X POST https://api.launchguard.dev/api/v1/connect \
 
 Response: `{ "ok": true, "app": "sandbox.example.com", "monitorId": "<id>", "dashboardUrl": "https://launchguard.dev/app/<id>", "firstConnect": true, "watchedTests": 0 }`
 
-- The user mints their `lg_` key in their LaunchGuard account (Developer / API keys) — the same key the chain endpoints use. Store it as `LAUNCHGUARD_API_KEY` (see the custom-test section's "Get the user's API key" step for how to ask).
-- A `404` means they have not added that app in LaunchGuard yet — tell them to add it at https://launchguard.dev/apps first, then reconnect.
-- Base URL: use `https://api.launchguard.dev`; if a `/api/v1/...` call returns 404, fall back to `https://recon-api-dev.centrive.ai` (LaunchGuard's own backend host, safe to call).
+- The user mints their `lg_` key (Developer / API keys) — the same key the chain endpoints use. Store it as `LAUNCHGUARD_API_KEY` (see "Get the user's API key" below for how to ask).
+- A `404` means they haven't added that app yet — tell them to add it at https://launchguard.dev/apps first, then reconnect.
+- Base URL: try `https://api.launchguard.dev`, fall back to `https://recon-api-dev.centrive.ai` on 404. **But `/api/v1/connect` is a special case:** its public-edge deploy is still in progress, so it may not be reachable on `api.launchguard.dev` yet (it works on the dev host). If unreachable on both, connect just isn't deployed everywhere — tell the user the link is pending and proceed with the scan/test rather than blocking. Don't assume the fallback rescues connect the clean way it rescues `/chains`.
 
 ### Then: author ONE tailored, business-logic test
 
@@ -277,16 +206,14 @@ Use this when the user wants to *prove* a specific exposure, not just scan. Trig
 
 > **Want to prove a flow WORKS, not that it's exploitable?** That is a *functional* test (a Playwright **script** chain with `intent:"functional"`, where PASS = working/green and FAIL = broken/red), not the HTTP request-plus-matcher chain documented below. Read `functional-methodology.md` in this skill directory for the two-gate authoring pattern and the functional verdict mapping. The HTTP-chain mechanics in this section are for security exploits; functional regression chains are authored as scripts and are the right tool for "watch that my signup / checkout / dashboard still works on every deploy."
 
-**Mental model:** a custom test is ONE HTTP request plus a rule (a "matcher") that says what "exploited" looks like versus what "safe/patched" looks like. You author it as JSON, submit it to LaunchGuard, and get back a verdict. That's the whole idea — no other concepts required.
+**Mental model:** a custom test is ONE HTTP request plus a rule (a "matcher") saying what "exploited" looks like vs "safe/patched". You author it as JSON, submit it, get back a verdict — a TEST OUTCOME:
+- `vulnerable` = test **FAIL** — the exploit reproduced (status in your success set AND your positive marker matched). The must-not-happen happened.
+- `fixed` = test **PASS** — the app positively denies it (a status in `fixedStatusIn`, e.g. 401/403/429, or a proven-empty result).
+- `inconclusive` = **NOT a result — a broken, unfinished test.** Your assertion didn't describe what the endpoint actually does (unhandled status, unparsed body, marker that never matched, setup that failed).
 
-A chain is **one reproducible exploit** that LaunchGuard stores and re-runs on demand, returning a verdict. A verdict is a TEST OUTCOME:
-- `vulnerable` = test **FAIL** - the exploit reproduced (status in your success set AND your positive marker matched). The thing you asserted must-not-happen happened.
-- `fixed` = test **PASS** - the app positively denies it (a status you listed in `fixedStatusIn`, e.g. 401/403/429, or a proven-empty result). The app met your expectation.
-- `inconclusive` = **NOT a result. It is a broken, unfinished test.** Your assertion did not describe what the endpoint actually does (an unhandled status, an unparsed body, a marker that never matched, a setup that failed).
-
-> **The author owns the assertion — this is the most important rule.** LaunchGuard does NOT decide whether the app is secure; it executes your request and reports which branch of YOUR matcher fired. The `assertion` block IS your test assertion, exactly like the `expect(...)` line in a unit test. So: before you author, you must be able to say in one sentence *"this endpoint SHOULD do X, and the test PASSES when it does."* If you can't, you don't have a test yet — you have a random ping.
+> **The author owns the assertion — the most important rule.** LaunchGuard does NOT decide whether the app is secure; it runs your request and reports which branch of YOUR matcher fired. The `assertion` block IS your assertion, like the `expect(...)` in a unit test. Before authoring, you must be able to say in one sentence *"this endpoint SHOULD do X, and the test PASSES when it does."* If you can't, you have a random ping, not a test.
 >
-> **Never accept an `inconclusive`.** It does not mean "we don't know." It means you haven't finished writing the test. The fix is always the same: **READ the actual response (status + body) you got, decide what the endpoint *should* do, and encode that expectation into the matcher** (`successStatusIn` / `fixedStatusIn` / a positive marker) so the run routes deterministically to PASS or FAIL. Re-run until it resolves. The ONLY time you archive instead of fix is when the test is genuinely unassertable — the engine could not even issue the request, so there is no response to read (e.g. a cross-tenant chain that dies at `no_credential_resolver` before any HTTP call). "I didn't define the expectation" is never that case.
+> **Never accept an `inconclusive`.** It means you haven't finished writing the test. The fix is always: READ the actual status + body, decide what the endpoint SHOULD do, and encode it into the matcher (`successStatusIn` / `fixedStatusIn` / a positive marker) so the run routes deterministically. Re-run until it resolves. The ONLY time you archive instead of fix is a genuinely unassertable test — the engine couldn't even issue the request, so there's no response to read (e.g. a cross-tenant chain dying at `no_credential_resolver` before any HTTP call). "I didn't define the expectation" is never that case.
 
 This is a real, opt-in capability, separate from the free scan. It runs only against a domain the user has **proven they own**, sends the **minimum** requests to prove the point, and in the read-only form below changes nothing on the target.
 
@@ -300,6 +227,38 @@ Every custom test is one of two classes, set by the top-level `watched` boolean 
 **Default to Proof.** Only set `watched: true` when the user's intent is explicitly ongoing protection — they said "watch this on every deploy", you're in the Connect flow, or you/they decide a specific proof is worth guarding. A user can promote a Proof to a Guard (or demote) anytime from the custom-tests page or via `PATCH /api/v1/chains/<id>` with `{ "watched": true|false }`.
 
 `watched` is **orthogonal to side-effect**: a mutation chain never auto-runs regardless (the safety gate is separate), so marking a mutation `watched: true` does not make it fire on deploy — only read-only Guards auto-run.
+
+### `lastResult` values (what each list row's last verdict means)
+
+Every chain row carries `lastResult`, the outcome of its most recent run:
+
+| `lastResult` | Meaning | Healthy state? |
+|---|---|---|
+| `fixed` | Last run PASSED — the app denied the exploit (or proved empty). For a functional chain, `fixed` = working/green. | ✅ This is the win, not a broken test. |
+| `vulnerable` | Last run FAILED — the exploit reproduced (marker matched). For a functional chain, `vulnerable` = broken/red. | ⚠️ A real finding (unless `dispositionState` is `honored`). |
+| `inconclusive` | The run was ambiguous/unsound — an unhandled status, unparsed body, a marker that never matched, a setup that failed. Not a result; a test that needs finishing (read the real response, fix the matcher). | 🔧 Fix the assertion; don't report either way. |
+| `null` (never run) | The chain has been ingested but never executed. **On a mutation chain this is EXPECTED, not broken** — mutations never auto-run, so a `lastResult:null` mutation is normal stored coverage awaiting an explicit confirmed run. | ✅ for mutations; for a read-only Guard, just run it once. |
+
+### Cleanup / triage pass — curating an existing suite
+
+When the user says "clean up / manage / triage / dedupe / prune / review my tests" (or you're tidying a suite you didn't author), this is decision logic, not authoring. List the suite (`GET /api/v1/chains` for all apps, or `?targetHost=<host>` for one), then apply this checklist **per chain**. When unsure, KEEP — archiving real coverage is the expensive mistake.
+
+**Archive a chain ONLY if one of these is true:**
+- **(a) Exact duplicate** of another *custom* chain — same `{method, path, target}` dedupe key, respecting the script-chain carve-out in Step 2.5 (dedupe script/Playwright chains by title or by diffing `spec.script`, **never** by their constant `(PLAYWRIGHT, "(script chain)", primary)` summary). Keep the better-titled / more-recently-passing one; archive the redundant twin.
+- **(b) Structurally unassertable** — the matcher has no positive marker (`jsonPathsPresent` / `bodyContainsAll` / `crossTenant` / `minTotalRows`), so the chain can only ever route to `fixed` or `inconclusive` and can NEVER reach `vulnerable`. It cannot prove the thing it claims to test. (Confirm by reading the `spec.assertion` via `GET /api/v1/chains/<id>` — don't infer from the row.)
+- **(c) Obsolete** — points at a dead/placeholder host or an endpoint that no longer exists (the path was removed). Verify before archiving: an endpoint that returns `404` to YOUR probe is not automatically "removed" — confirm the route is genuinely gone, not just denying you.
+
+**NEVER archive (these look broken but are healthy):**
+- A **mutation chain that has merely never run** (`lastResult:null` on a non-GET). Mutations never auto-run by design — `null` is the expected resting state, not a defect. Mark it "mutation, fires real side effects, run only on explicit request."
+- A chain whose unconfirmed `/run` returned **`409 needsConfirmation`** — that 409 is the mutation gate, not a failure.
+- A chain with a **`proposed` or `honored` `dispositionState`** — a human (or you) recorded that its verdict is intended/reviewed. `honored` counts green; `proposed` is awaiting a human's confirmation. Archiving it discards that decision. (`stale_spec` / `stale_escalation` mean re-review, not archive.)
+- A **passing `watched` guard just because it might overlap the built-in scanner.** Custom chains and the default scanner are *independent test sources* — see below; you cannot reliably tell that a custom chain duplicates scanner coverage, so do NOT archive one on a "the scanner probably covers this" guess.
+
+Archiving is reversible (`POST /api/v1/chains/<id>/restore`), but treat every archive as if it weren't: report what you're archiving and why before you do it, and prefer leaving a borderline chain in place.
+
+### Custom chains vs. the default scanner — independent sources, no cross-dedupe
+
+The always-on default scanner and the custom chains you author are **two independent test sources.** The chains API exposes **no scanner-origin signal** — a list row never tells you "the built-in scanner already covers this table/endpoint." So there is **no reliable way to dedupe a custom chain against default-scanner coverage today.** Concretely: a per-table anon-read custom guard may well overlap what the scanner checks, but you cannot prove it from the API, so **do NOT archive a passing `watched` guard on the assumption the scanner has it covered.** Only dedupe custom-chain-against-custom-chain, by the dedupe key (Step 2.5). This is the honest current limitation, not a capability — don't present cross-source dedupe as something you can do.
 
 ### The format: one request plus a matcher, submitted as JSON
 
@@ -315,7 +274,7 @@ A custom test is one HTTP request plus a matcher block that says "exploited look
 | every JSONPath must resolve to a value | `assertion.jsonPathsPresent` | non-null marker |
 | pull a value out for a later step | `steps[].extract[]` | only needed for multi-step chains |
 | severity | top-level `severity` | `critical` \| `high` \| `medium` \| `low` |
-| watch it on every deploy (Guard) vs one-shot (Proof) | top-level `watched` | boolean, **defaults `false` (Proof)**. See "Proof vs Guard" below |
+| watch it on every deploy (Guard) vs one-shot (Proof) | top-level `watched` | boolean, **defaults `false` (Proof)**. See "Proof vs Guard" above |
 
 That is the whole matcher vocabulary. Do NOT invent `bodyContainsAny`, `statusEquals`, `regex`, etc.
 
@@ -323,17 +282,15 @@ That is the whole matcher vocabulary. Do NOT invent `bodyContainsAny`, `statusEq
 
 ### Step 1: Get the user's API key
 
-Before anything else, you need a LaunchGuard API key. **Ask the user to paste theirs.** Tell them where to get it: their LaunchGuard account → Developer / API keys at launchguard.dev. The key looks like `lg_` followed by ~40 characters — if a pasted value doesn't start with `lg_`, it's not the right key, so ask again before spending a request on it. If the user doesn't have one yet, tell them how to create it there; do NOT attempt to mint or guess a key yourself.
-
-Session convention: store the pasted key as the env var `LAUNCHGUARD_API_KEY` and use `-H "Authorization: Bearer $LAUNCHGUARD_API_KEY"` in every call below. Without it, every chain call returns 401 and the flow dies.
+Before anything else, you need a LaunchGuard API key. **Ask the user to paste theirs** (their LaunchGuard account → Developer / API keys at launchguard.dev). The key starts `lg_` followed by ~40 chars — if a pasted value doesn't start with `lg_`, ask again before spending a request. Never mint or guess a key. Store it and send it on EVERY chain call below; without it every call 401s.
 
 ```bash
-export LAUNCHGUARD_API_KEY="<paste the key the user gave you>"
+export LAUNCHGUARD_API_KEY="<paste the key the user gave you>"   # then: -H "Authorization: Bearer $LAUNCHGUARD_API_KEY"
 ```
 
-**Base URL rule (use everywhere):** try `https://api.launchguard.dev` first. The `/api/v1/*` chain routes are not all live on that public edge yet, so a call there may return `404` (and currently it answers with an HTML page, not the JSON `{"error":...}` envelope). The moment ANY `/api/v1/...` call 404s, switch to `https://recon-api-dev.centrive.ai` and use that host for EVERY chain call for the rest of the session (list, get, ingest, run, delete). It is LaunchGuard's own backend host and is safe to call; it is not data exfiltration. Do not keep retrying `api.launchguard.dev` per call once you have seen it 404.
+**Base URL rule (use everywhere):** try `https://api.launchguard.dev` first. The `/api/v1/*` chain routes are not all live on that public edge yet, so a call may return `404` (currently an HTML page, not the JSON `{"error":...}` envelope). The moment ANY `/api/v1/...` call 404s, switch to `https://recon-api-dev.centrive.ai` and use that host for EVERY chain call for the rest of the session — it is LaunchGuard's own backend host, safe to call, not exfiltration. Don't keep retrying `api.launchguard.dev` once you've seen it 404.
 
-> Heads up — across one full run you'll touch a few different LaunchGuard hosts: the free scan submits to `www.launchguard.dev` and streams from a `*.centrive.ai` backend, while the custom-test API lives at `api.launchguard.dev` / `recon-api-dev.centrive.ai`. These are different LaunchGuard services, not different products. Seeing more than one host is expected.
+> Across one run you'll touch several LaunchGuard hosts: the free scan submits to `www.launchguard.dev` and streams from a `*.centrive.ai` backend; the custom-test API lives at `api.launchguard.dev` / `recon-api-dev.centrive.ai`. Different services, same product — seeing more than one host is expected.
 
 ### Step 2: Domain ownership
 
@@ -355,18 +312,23 @@ curl -X POST https://api.launchguard.dev/api/v1/domains/verify \
 
 ### Step 2.5: list existing chains first (avoid duplicates)
 
-Before authoring anything, list what already exists for this host so you don't re-create a test that's already there:
+Before authoring anything, list what already exists so you don't re-create a test that's already there. To see chains for one app, filter by host; **with NO `targetHost`, the list returns every chain across all monitored hosts — that is how you discover which apps the account has** (the only way to enumerate apps from the API):
 
 ```bash
+# this host only:
 curl -s "https://api.launchguard.dev/api/v1/chains?targetHost=sandbox.example.com" \
   -H "Authorization: Bearer $LAUNCHGUARD_API_KEY"
+# every app the account monitors (omit targetHost):
+curl -s "https://api.launchguard.dev/api/v1/chains" -H "Authorization: Bearer $LAUNCHGUARD_API_KEY"
 ```
 
-Response: `{ "count": N, "chains": [ { "chainId": "...", "title": "...", "lastResult": "...", "exploit": { "method": "POST", "path": "/api/chat", "target": "primary" } }, ... ] }`
+Response: `{ "count": N, "chains": [ { "chainId": "...", "title": "...", "lastResult": "...", "watched": false, "dispositionState": "none", "exploit": { "method": "POST", "path": "/api/chat", "target": "primary" } }, ... ] }`. The `lastResult` values are defined in the table below ("Proof vs Guard" → "`lastResult` values"); the full row shape is in `chains-reference.md` §7.
 
-The `exploit` object (`{method, path, target}`) is the **dedupe key**. Note that `path` is the full path INCLUDING the query string, so `/api/widget/config?slug=a` and `?slug=b`, or `/rest/v1/t?select=x` and `?select=x,y`, are DISTINCT tests (they probe different things) and are not duplicates. Treat two chains as duplicates only when method, full path (query included), and target all match. If you are unsure whether two near-identical entries are really the same test, `GET /api/v1/chains/<chainId>` on each and compare the full `spec` before archiving either. If a chain already covers the same exploit key, do NOT author a new one: re-run it (`POST /chains/<id>/run`), or, if the user wants a genuinely different assertion, inspect the blueprint and propose a distinct variant. Only author a new chain when nothing in the list covers the rule you're testing.
+**The dedupe key for an HTTP request-plus-matcher chain is the `exploit` object `{method, path, target}`** — and ONLY for those chains. `path` is the FULL path including the query string, so `/api/widget/config?slug=a` vs `?slug=b`, or `/rest/v1/t?select=x` vs `?select=x,y`, are DISTINCT tests, not duplicates. Two HTTP chains are duplicates only when method, full path (query included), AND target all match. If unsure, `GET /api/v1/chains/<chainId>` on each and diff the full `spec` before archiving either.
 
-If a listed chain is a duplicate or is broken, you can archive it with `DELETE /api/v1/chains/<chainId>` (success `200 { "ok": true, "archived": true }`). Archiving removes it from the list, stops it auto-running, preserves its run history, and frees its title so you can re-author cleanly under the same title if needed. Archiving is reversible: `POST /api/v1/chains/<chainId>/restore` un-archives it (find archived ids with `GET /api/v1/chains?includeArchived=true`). A restore fails with `409 { "titleCollision": true }` if an active chain re-used that freed title in the meantime (rename or archive that one first, then restore).
+> **⛔ SAFETY-CRITICAL CARVE-OUT — the `{method,path,target}` dedupe key is INVALID for script / Playwright chains.** A script chain (functional regression or captured-session auth test) has no per-request method/path/target — its `exploit` key collapses to a constant like `(PLAYWRIGHT, "(script chain)", primary)`, IDENTICAL across every script chain. Dedupe those by that key and you will flag nearly every functional test as a "duplicate" of the first one and **archive real, distinct coverage.** A script chain's identity is its **script body / title**, not its request tuple. So for any chain whose target/method reads as `PLAYWRIGHT` / `(script chain)`: dedupe by **title**, or by `GET /api/v1/chains/<id>` and diffing the actual `spec.script` body — **NEVER by the exploit summary.** When in doubt, treat two script chains as DISTINCT.
+
+Only author a new chain when nothing covers the rule. If a chain already covers the same exploit key, re-run it (`POST /chains/<id>/run`) instead of duplicating; or, for a genuinely different assertion, inspect the blueprint and author a distinct variant. To remove a true duplicate or broken test, archive it with `DELETE /api/v1/chains/<chainId>` (reversible via `POST /chains/<id>/restore`) — see the **Cleanup / triage pass** section below for the full archive decision rules, and `chains-reference.md` §7 for the archive/restore contract.
 
 ### Step 3: write the proving curl first, then translate it
 
@@ -417,13 +379,13 @@ Pick a positive marker that proves the **paid work actually ran**: a completion 
 
 Use this to prove **"a logged-in user can read another tenant's rows"**: broken or missing row-level security on a Supabase table. This is LaunchGuard's flagship authenticated test; a generic scanner can't write it. The engine signs up a **fresh throwaway account per run** (via `spec.env.anonKey`) and queries the table as that low-privilege identity. If any returned row is owned by someone else, RLS is broken.
 
-> **PRE-FLIGHT GATE — this template only works on a Supabase-Auth app with a legacy `eyJ...` anon key.** The engine mints the second identity by signing a fresh user UP THROUGH SUPABASE AUTH (GoTrue) using the anon key. Two things break it, so check both BEFORE authoring:
-> 1. **Auth provider.** If the app uses Clerk / Auth0 / NextAuth / Firebase Auth (anything that is NOT Supabase Auth), there is no GoTrue signup path and the run dies at `auth_failed: no_credential_resolver` before any HTTP request — it never reaches a verdict, so it is unassertable and you must not author it.
-> 2. **Key format.** The new `sb_publishable_...` keys carry no embedded JWT identity. `crossTenant`/`{{auth.userId}}` need a legacy `eyJ...` JWT anon key. A `sb_publishable_` key works fine as a plain `apikey`/`authorization` header for the *anonymous*-read style below, but NOT for the throwaway-signup cross-tenant style.
+> **PRE-FLIGHT GATE — this template only works on a Supabase-Auth app with a legacy `eyJ...` anon key.** The engine mints the second identity by signing a fresh user up through Supabase Auth (GoTrue). Two things break it — check both BEFORE authoring:
+> 1. **Auth provider.** Clerk / Auth0 / NextAuth / Firebase Auth (anything NOT Supabase Auth) has no GoTrue signup path: the run dies at `auth_failed: no_credential_resolver` before any HTTP request, so it is unassertable — do NOT author it.
+> 2. **Key format.** A new `sb_publishable_...` key carries no embedded JWT identity; `crossTenant`/`{{auth.userId}}` need a legacy `eyJ...` JWT anon key.
 >
-> When either is true, do NOT use this template. Fall back to the **anonymous-exposure** style (the second Supabase read style below): hit the owner-scoped table directly with the public key in headers and assert `minTotalRows >= 1`. That proves "an outsider can read this table at all" without needing a second authenticated identity — the strongest cross-tenant signal still available on a Clerk/`sb_publishable_` app.
+> When either is true, use a fallback instead: (a) the **anonymous-exposure** style below (`minTotalRows >= 1` with the public key in headers — works with EITHER key type, no Supabase Auth needed); or (b) a **captured-session script chain** (`chains-reference.md` §9) to run the cross-tenant read as a real provisioned user even on a Clerk/Auth0/Firebase-Auth app.
 
-You need the target's **public** Supabase anon key + project ref — both client-side values you can read from the site's JS bundle or the free scan's `secrets` output (a legacy anon key is a public `eyJ...` JWT; newer projects expose a `sb_publishable_...` key instead — both are meant to be public, so using them is not exfiltration). Template:
+You need the target's **public** Supabase anon key + project ref — client-side values that are meant to be public (using them is not exfiltration). Get them by grepping the site's JS bundles (`supabase.co` → project ref, `sb_publishable_` or a legacy `eyJ...` token → the key) or from the free scan's `secrets` output. Template:
 
 ```json
 {
@@ -463,24 +425,17 @@ Validation note: because the engine signs up its OWN throwaway account for this 
 
 Two Supabase read styles, pick by the question: to prove **"a logged-in user can cross tenant boundaries"**, use `spec.env.anonKey` (the engine signs up a fresh user, as above). To prove the simpler **"this table is readable by an anonymous client at all"**, send a `target: "supabase"` GET to `/rest/v1/<table>` with the target's public anon key in the request headers (`apikey` AND `authorization: Bearer <key>`, plus `"Prefer": "count=exact"`) and assert on `minTotalRows: 1`. This style works with EITHER a legacy `eyJ...` JWT or a new `sb_publishable_...` key, and it does NOT require Supabase Auth — so it is the correct cross-tenant/exposure test for Clerk and other non-Supabase-Auth apps. Both styles are valid; the first tests RLS for authenticated users (Supabase-Auth only), the second tests anonymous exposure (any app).
 
-### Footguns the validator and engine enforce (these fail authors most)
+### Footguns that fail authors most
 
-- **`allowedTargets.primary` must byte-equal the normalized `targetHost`** (lowercased, no scheme, no path, no port). Pre-normalize it yourself, e.g. `https://Sandbox.Example.com/x` becomes `sandbox.example.com`.
-- **`request.target` is the enum `primary` / `supabase` / `api`, not a URL.** The host comes from `allowedTargets[target]`.
-- **`spec.sideEffect` (top-level) is required** and must be a string. Use `"read_only"` for read exploits.
-- **Always include at least one positive marker** (`jsonPathsPresent` / `bodyContainsAll` / `crossTenant` / `minTotalRows`). `successStatusIn` alone can only ever yield `fixed` or `inconclusive`, never `vulnerable`.
-- **`fixedStatusIn` is required** (e.g. `[401,403,429]`). The engine throws at run time without it (`fixedStatusIn is not iterable`), turning a valid chain into a false `inconclusive`. Both templates above include it; never drop it.
-- **`title` must be unique among your ACTIVE chains.** Re-ingesting with a title that an active chain already uses fails (`500`), so get the spec right before you ingest and give each chain a fresh, descriptive title. A bad chain is no longer permanent, though: you can `DELETE /api/v1/chains/<id>` to archive it, which removes it from the list, stops it auto-running, and frees its title to re-ingest cleanly. And archiving is reversible: `POST /api/v1/chains/<id>/restore` brings the chain back, except it returns `409 titleCollision` if an active chain reused that title in the meantime (rename or archive that one first).
-- **A 404 is never `fixed`.** Only a status you list in `fixedStatusIn` (or a proven-empty result) counts as patched, and `404` is never allowed in that set, so a deleted endpoint never reads as a false fix. `[401,403,429]` is the common deny set, but any genuine deny status works: include `400` too when the patched app rejects the exploit input that way (e.g. a rejected OTP returns `400`).
-- **Side-effect is re-derived from the HTTP method, and any non-GET is "mutation".** The rule is method-based, not word-based: a `GET`/`HEAD` (and a Supabase `/rest/v1/` GET) is `read_only`; **any `POST`/`PUT`/`PATCH`/`DELETE` is `mutation`**, regardless of how safe the path looks. A `mutation` chain never auto-runs on deploy. `POST /api/v1/chains/<id>/run` on it returns **409** ONLY when you have not confirmed (`{ "error": "...", "sideEffect": "mutation", "needsConfirmation": true }`); with body `{ "confirmMutation": true }` (against a domain the user monitors) it actually runs and returns the normal verdict, firing real writes, charges, or OTP exactly once. The auto-run gate stays in place so LaunchGuard never fires a write on its own; only an explicit confirmed `/run` does. See "Running mutation tests (explicit confirmation)" below.
-- **JSONPath is a custom subset** (`$.a.b`, `$[0]`, `$[*].x`, `$[?(@.x != "y")]`). No recursive `..`, no slices, only `==` / `!=`. See `chains-reference.md`.
-- **`minTotalRows` needs the request header `"Prefer": "count=exact"`** — without it PostgREST returns a null `content-range` total and the chain routes to a false `inconclusive` (`ambiguous_2xx: total null`). With it, an empty table returns an exact `0` and the chain reads a clean `fixed` (`exploit_absent: total 0 < 1`). ALWAYS add this header to any `minTotalRows` / Supabase anonymous-read chain.
-- **Cross-host targeting works and is the key to backend/Supabase tests.** Only `allowedTargets.primary` must byte-equal `targetHost`; `allowedTargets.api` and `.supabase` are free-form passthrough hosts that may be a DIFFERENT host than the monitored domain (e.g. `primary: app.example.com`, `api: api-backend.example.com`, `supabase: <ref>.supabase.co`). Use `target: "api"` to hit a backend host directly — that is where unauth BOLA / object-access holes usually live, even when the frontend proxy is gated.
-- **Redirect-based auth gates (302 → /login) currently route to `inconclusive`, not `fixed`** (the engine throws `exploit_body_unparseable` on a 3xx before honoring `fixedStatusIn`). A redirect to a login page IS a clean deny = PASS, but the engine can't yet express that. Known limitation for any route behind Cloudflare Access / oauth2-proxy / Vercel-or-Caddy auth. Author the chain with the deny status in `fixedStatusIn` + `bodyContainsAll:["Redirecting","/login"]` so it auto-resolves to `fixed` once the engine is patched, and tell the user it's pending an engine fix rather than leaving it silently inconclusive.
-- **A GET that triggers downstream WRITES is a deploy hazard.** Side-effect is derived from the HTTP method, so a `GET` is classified `read_only` + auto-replay even if it proxies to something that writes to a shared DB / spends money. There is no way to downgrade a GET to manual-only, so such a chain will fire its write on every deploy. Do NOT author it (or archive it if you did); cover the underlying endpoint a safer way.
-- **The matcher cannot express rate-limit, response-time, or response-header assertions.** There is no "fire N times, assert a 429", no `maxResponseMs`, no header matcher. So a pure *missing-rate-limit* (OWASP API4) or *missing-security-header* bug is not directly authorable as a chain — you can only prove "the expensive work ran once". Report those as code-review findings, not chains.
-- **A `GET /rest/v1/rpc/<fn>` only works for a zero-argument function.** A Supabase RPC that requires parameters returns `404 PGRST202` to a GET (no matching empty-arg signature) — and `404` is never `fixed`, so the chain is permanently inconclusive. Before authoring a GET-RPC test, confirm the function takes no required args; otherwise the RPC is a `mutation` (POST with a body) and is gated, not an anonymous read.
-- **Severity is yours, set it honestly, and don't cry wolf.** A `vulnerable` verdict only means "an outsider reached this and the marker matched" — it does NOT mean the data is sensitive. Aggregate public counters (`/api/stats`), a published pricing list, or a public blog feed answer unauthenticated BY DESIGN and are NOT findings. Reserve `vulnerable` for data that crosses a real trust boundary (another tenant's rows, PII, internal ids/emails, secrets, paid work). When genuinely ambiguous, author the test but label it "needs product triage" instead of asserting a scary severity. And note: a clean sweep where every table returns `fixed` is the suite WORKING, not broken assertions.
+These are the high-stakes ones — the **judgment and safety** rules. The exhaustive mechanical catalog (host-normalization byte-equality, the `target` enum, the JSONPath subset grammar, the `minTotalRows` `Prefer: count=exact` header, RPC zero-arg rule, redirect-routing limitation, title-uniqueness/`500`) is in **`chains-reference.md` §1–§8** — read it before authoring anything past the two templates.
+
+- **Always include at least one positive marker** (`jsonPathsPresent` / `bodyContainsAll` / `crossTenant` / `minTotalRows`). `successStatusIn` alone can only ever yield `fixed` or `inconclusive`, never `vulnerable` — a markerless chain is structurally unassertable (the cleanup-archive criterion (b)).
+- **`fixedStatusIn` is required** (e.g. `[401,403,429]`). The engine throws at run time without it (`fixedStatusIn is not iterable`) and the run becomes a false `inconclusive`. Both templates include it; never drop it. Add `400` when the patched app rejects the exploit input that way (e.g. a rejected OTP). **A `404` is never `fixed`** — a deleted endpoint must never read as a false fix.
+- **Side-effect is re-derived from the HTTP method — any non-GET is `mutation`.** Method-based, not word-based: `GET`/`HEAD` (and a Supabase `/rest/v1/` GET) is `read_only`; any `POST`/`PUT`/`PATCH`/`DELETE` is `mutation`. A `mutation` chain NEVER auto-runs. An unconfirmed `/run` returns `409 { "needsConfirmation": true }`; only `{ "confirmMutation": true }` (against a monitored domain) fires it, exactly once. The auto-run gate means LaunchGuard never fires a write on its own. See "Running mutation tests" below.
+- **A GET that triggers downstream WRITES is a deploy hazard.** Side-effect is method-derived, so a `GET` that proxies to a write / a spend is still classified `read_only` + auto-replay and will fire that write on EVERY deploy. There is no GET→manual downgrade. Do NOT author it (or archive it if you did); cover the endpoint a safer way.
+- **Cross-host targeting is the key to backend/Supabase tests.** Only `allowedTargets.primary` must byte-equal `targetHost`; `.api` and `.supabase` are free-form passthrough hosts that may differ from the monitored domain. Use `target: "api"` to hit a separate backend directly — unauth BOLA / object-access holes usually live there, even when the frontend proxy is gated.
+- **The matcher cannot express rate-limit, response-time, or response-header assertions.** No "fire N, expect 429", no `maxResponseMs`, no header matcher. A pure missing-rate-limit (OWASP API4) or missing-security-header bug is NOT authorable as a chain — report those as code-review findings, not chains.
+- **Severity is yours, set it honestly, and don't cry wolf.** A `vulnerable` verdict only means "an outsider reached this and the marker matched" — it does NOT mean the data is sensitive. Aggregate public counters (`/api/stats`), a published pricing list, or a public blog feed answer unauthenticated BY DESIGN and are NOT findings (the `methodology.md` Step 6 intended-public filter). Reserve `vulnerable` for data that crosses a real trust boundary (another tenant's rows, PII, internal ids/emails, secrets, paid work). When genuinely ambiguous, label it "needs product triage" instead of asserting a scary severity. A clean sweep where every table returns `fixed` is the suite WORKING, not broken assertions.
 
 ### Step 4: submit and run
 
@@ -505,28 +460,36 @@ Report the verdict plainly:
 
 ### Managing the test suite via the API
 
-Your `lg_` key gives you the FULL custom-test lifecycle on a domain's suite without a human:
-- **Create:** ingest a new chain with `POST /api/v1/chains`. Defaults to a Proof (`watched: false`); pass `"watched": true` to ingest it directly as a Guard.
-- **List / inspect:** `GET /api/v1/chains?targetHost=<host>` then `GET /api/v1/chains/<id>` for any blueprint. Each row carries `watched` (Guard vs Proof). Add `?includeArchived=true` to also list archived chains (each row carries `archived` / `archivedAt`) when you need to find one to restore.
-- **De-duplicate:** compare each `exploit` `{method,path,target}` key; archive duplicates.
-- **Promote / demote (watch intent):** `PATCH /api/v1/chains/<id>` with `{ "watched": true }` to make a Proof a Guard (re-runs on deploy), or `{ "watched": false }` to stop watching it. This is how you keep the watched suite curated instead of letting every read-only proof auto-run.
-- **Modify in place:** `PATCH /api/v1/chains/<id>` with `{ title?, severity?, spec?, watched? }` (at least one). Changing the `spec` re-validates it and re-derives the side-effect, so flipping a method to a non-GET can turn the chain into a mutation. Use this to fix or evolve a test instead of archive-then-reingest.
-- **Run any chain:** `POST /api/v1/chains/<id>/run`. Read-only chains run freely and return a verdict. A mutation chain runs only with body `{ "confirmMutation": true }` against a domain the user monitors (it fires real side effects); see "Running mutation tests (explicit confirmation)" below.
-- **Archive / restore:** `DELETE /api/v1/chains/<id>` archives a duplicate, broken, or obsolete test (`200 {"ok":true,"archived":true}`), and `POST /api/v1/chains/<id>/restore` brings it back (`200 {"ok":true,"restored":true}`). Archiving is reversible: list archived ones with `GET /api/v1/chains?includeArchived=true` to find the id, then restore. A restore returns `409 { "titleCollision": true }` if an active chain re-used that title after the archive (rename or archive that one first). The same calls work whether you authored the chain or not, as long as it is your account's.
+Your `lg_` key gives you the FULL custom-test lifecycle on a domain's suite without a human. Full request/response contracts (status codes, error shapes, the `archived`/`restore`/`disposition` details) are in `chains-reference.md` §7 + §10; the **archive decision rules** are the **Cleanup / triage pass** section above. The operations:
+
+| Operation | Endpoint | Note |
+|---|---|---|
+| Create | `POST /api/v1/chains` | defaults to a Proof; `"watched": true` ingests a Guard |
+| List / discover apps | `GET /api/v1/chains[?targetHost=<host>]` | omit `targetHost` to list every app's chains; add `?includeArchived=true` to include archived rows |
+| Inspect one | `GET /api/v1/chains/<id>` | full `spec` — diff this to confirm a dedupe, especially for script chains |
+| Promote / demote | `PATCH /api/v1/chains/<id> { "watched": true\|false }` | curate the watched suite without re-ingesting |
+| Modify in place | `PATCH /api/v1/chains/<id> { title?, severity?, spec?, watched? }` | changing `spec` re-validates + re-derives side-effect (a non-GET method flips it to mutation) |
+| Run | `POST /api/v1/chains/<id>/run` | read-only runs freely; a mutation needs `{ "confirmMutation": true }` — see "Running mutation tests" |
+| Archive / restore | `DELETE /api/v1/chains/<id>` / `POST /api/v1/chains/<id>/restore` | reversible; restore can `409 titleCollision`. Apply the Cleanup checklist first |
+
+**Dedupe** by the `exploit` `{method,path,target}` key — but for script/Playwright chains use the carve-out in Step 2.5 (dedupe by title / `spec.script`, never the constant exploit summary). These calls work whether or not you authored the chain, as long as it's your account's.
+
+**Disposition (mark a `vulnerable` verdict intended):** `POST /api/v1/chains/<id>/disposition` with `{ "disposition": "proposed", "reason": "..." }`. An `lg_` API key may only **propose** — a human confirms `accepted`. Every row carries `dispositionState` (`none|proposed|stale_spec|stale_escalation|honored`); **branch on that, not raw `disposition`**: `honored` → don't re-flag, read the reason; `stale_spec`/`stale_escalation` → prior acceptance no longer holds, surface for human re-review. Full model in `chains-reference.md` §10.
+
+### Authenticated tests with a captured session
+
+For "logged in but under-privileged" bugs the engine can't mint an identity for — a Pro-only route reachable by a free user, an admin function reachable by a member, an authenticated cross-tenant IDOR on a non-Supabase-Auth (Clerk/Auth0/Firebase) app — the user can hand you a **captured browser session** (a Playwright `storageState`). Upload it once with `POST /api/v1/chains/credentials` and reference the returned `credentialId` from a **script** chain, which then runs authenticated as that real identity. This is the third credential mode (alongside anonymous and Supabase-anon) and the way to prove authenticated/Pro-gated/cross-tenant exposures black-box. Full contract and the non-secret `identity` (`label` + `metadata`) shown per test: `chains-reference.md` §9.
 
 ### Running mutation tests (explicit confirmation)
 
-A `mutation` chain (any non-GET exploit, e.g. a `POST /verify-otp` takeover or a `POST /topup` charge) is real, valuable coverage, and you CAN now run it with your API key, but only behind an explicit confirmation gate because it fires real side effects (writes, charges, OTP) against the target:
+A `mutation` chain (any non-GET exploit, e.g. a `POST /verify-otp` takeover or a `POST /topup` charge) is real, valuable coverage. You CAN run it with your API key, but only behind an explicit confirmation gate because it fires real side effects (writes, charges, OTP) against the target:
 
-- `POST /chains/<id>/run` on a mutation chain WITHOUT confirmation returns `409 { "error": "...", "sideEffect": "mutation", "needsConfirmation": true }`. That 409 is not a verdict; it is the gate asking you to confirm.
-- `POST /chains/<id>/run` with body `{ "confirmMutation": true }` actually runs it and returns the normal verdict. This fires the real side effect against the target exactly once.
-- A mutation run works against any domain the user **monitors** (has added to their LaunchGuard account). Adding the app is the ownership signal, so no separate DNS / well-known verification is needed (trust-the-owner now covers mutations, the same as read-only runs). A host that is NOT in the account still needs verified ownership, and a run against one returns `403`.
+- An unconfirmed `POST /chains/<id>/run` returns `409 { "sideEffect": "mutation", "needsConfirmation": true }` — the gate, NOT a verdict and NOT a defect.
+- `POST /chains/<id>/run` with `{ "confirmMutation": true }` runs it once and returns the normal verdict, firing the real side effect exactly once. Works against any domain the user **monitors** (trust-the-owner covers mutations like read-only runs); a host not in the account returns `403`.
 
-The gate exists because a human running a mutation from the LaunchGuard dashboard gets per-step approval before each write fires. Your equivalent of that consent is the explicit `confirmMutation: true` plus the user's own instruction, against a domain in their account. So only fire a mutation run when ALL of these hold: the user explicitly told you to, the domain is one they own (monitored in their account), and you send the minimum (one run). Never loop or re-fire it. Auto-deploy re-runs never fire mutations; only an explicit confirmed `/run` does.
+The gate is your equivalent of the per-step approval a human gets in the dashboard. So fire a mutation run only when ALL hold: the user explicitly told you to, the domain is one they monitor, and you send the minimum (one run, never a loop). Auto-deploy re-runs NEVER fire mutations.
 
-You can still author, list, dedupe, modify, and archive mutation chains via the API as usual. When you report on the suite, a mutation chain you have not been asked to fire should be marked "mutation, fires real side effects, run only on explicit request" rather than called broken. Do NOT archive one just because an unconfirmed `/run` returned 409 (that 409 is the gate, not a defect). Only archive a mutation test if it is a true duplicate or genuinely obsolete.
-
-One subtlety: a test can be semantically a read yet still be classified `mutation` because it uses a non-GET method (e.g. a `POST /balance` that only fetches a balance). That still means it never auto-runs and a manual `/run` needs `confirmMutation: true`. Do not rewrite the method to GET just to dodge the gate, since that would change what the test actually sends.
+You can still author, list, dedupe, modify, and archive mutation chains as usual. When reporting on a suite, mark a mutation you haven't been asked to fire as "mutation, fires real side effects, run only on explicit request" — do NOT call it broken and do NOT archive it just because an unconfirmed `/run` returned 409. A semantically-read endpoint behind a non-GET method (e.g. `POST /balance`) is still classified `mutation`; don't rewrite it to GET to dodge the gate — that changes what the test sends.
 
 ### Boundary
 

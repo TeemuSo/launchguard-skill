@@ -169,7 +169,7 @@ Body: `{ title, targetHost, severity, spec, source?, watched? }`. `watched` defa
 ```json
 { "chainId": "<uuid>", "autoReplay": true, "sideEffect": "read_only", "watched": false }
 ```
-`autoReplay: true` means the chain is allowed to run. If the request looked mutating (write-style method/path), the response instead carries `"note": "Mutating chain stored as manual-only; it will not auto-run."` — meaning it was stored but won't auto-run, and a `/run` call returns 409. Errors: `400` (validation / SSRF), `401` (auth), `500`.
+`autoReplay: true` means the chain is allowed to run. If the request looked mutating (write-style method/path), the response instead carries `"note": "Mutating chain stored as manual-only; it will not auto-run."` — meaning it was stored but won't auto-run, and a `/run` call returns 409. **`title` must be unique among your ACTIVE chains** — re-ingesting a title an active chain already uses fails (`500`), so get the spec right and give each chain a fresh, descriptive title (archiving a chain frees its title to re-ingest cleanly). Errors: `400` (validation / SSRF), `401` (auth), `500` (incl. duplicate active title).
 
 ### PATCH /api/v1/chains/:id (modify)
 
@@ -218,11 +218,87 @@ Errors:
 
 ## 8. Current limitations worth telling the author
 
-- Only two credential modes work without stored secrets today: anonymous (`auth: {}`) and Supabase anon (`spec.env.anonKey` signs up a fresh test account per run). Any bearer / cookie / static-token chain that needs a stored secret resolves to null and routes the run to `inconclusive`.
+- Three credential modes work today: **anonymous** (`auth: {}`), **Supabase anon** (`spec.env.anonKey` signs up a fresh test account per run), and **captured session** (a Playwright `storageState` you upload once and reference by `credentialId`, for **script** chains — see §9). The captured-session mode is what proves the "logged in but under-privileged" bugs the other two can't: a Pro-only route reachable by a free user, an admin function reachable by a member, an authenticated cross-tenant IDOR on a non-Supabase-Auth app. Any OTHER bearer / cookie / static-token chain that needs a stored secret you did NOT supply still resolves to null and routes the run to `inconclusive`.
 - **`spec.env.anonKey` cross-tenant signup requires a Supabase-Auth app + a legacy `eyJ...` JWT anon key.** It signs a fresh user up through Supabase Auth (GoTrue). On a Clerk / Auth0 / Firebase-Auth app there is no GoTrue path → the run dies at `auth_failed: no_credential_resolver` before any HTTP request (unassertable — don't author it). A new-format `sb_publishable_...` key carries no JWT identity, so it also can't drive the signup. On those apps, fall back to the anonymous-exposure style: a plain `target:"supabase"` GET to `/rest/v1/<table>` with the public key in `apikey`/`authorization` headers + `Prefer: count=exact` + `minTotalRows: 1`. The `sb_publishable_` key works fine in that header role.
 - **Cross-host targeting is supported.** Only `allowedTargets.primary` must byte-equal `targetHost`; `allowedTargets.api` and `.supabase` are free-form passthrough hosts and may differ from the monitored domain. This is how you reach a separate backend host (`target:"api"`) or the Supabase project (`target:"supabase"`) — essential since unauth object-access holes usually live on the backend, not the gated frontend proxy.
 - A GET whose handler causes downstream WRITES still classifies `read_only` + auto-replay (side-effect is method-derived) and will fire its write on every deploy — there is no GET→manual downgrade. Don't author such a chain; cover the endpoint another way or archive it.
 - The matcher asserts only on status + body content + JSON markers + content-type. It cannot express rate-limit ("fire N, expect a 429"), response time, or response headers — so missing-rate-limit (API4) and missing-security-header bugs are code-review findings, not chains.
-- **The credential ceiling: only anonymous and Supabase-anon identities exist.** Any bug behind "logged in but under-privileged" — a Pro-only route reachable by a free user, an admin function reachable by a member, an authenticated cross-tenant IDOR on a non-Supabase-Auth app — cannot be proven `vulnerable` black-box, because the engine can't mint that authenticated-but-limited identity. A black-box run hits `401 auth_required` and reads `fixed`, masking the bug. Author these as stored coverage + a code-review finding, and tell the user the chain can't auto-prove it until a bring-your-own-session/bearer credential mode ships. Never present that `fixed` as "safe".
+- **The credential ceiling has moved: captured sessions now cross it (for script chains).** The engine can mint anonymous and Supabase-anon identities itself, but it could never mint an "authenticated but under-privileged" identity (a free user, a member, a specific tenant) — so a bug behind one of those used to read a false `fixed` (the black-box run hit `401 auth_required`) and was unprovable. That is no longer true for **script** chains: upload the target session once as a captured credential (§9) and the script runs as that real logged-in identity, so a Pro-only route reachable by a free user, an admin function reachable by a member, or an authenticated cross-tenant IDOR on a non-Supabase-Auth app CAN now be proven `vulnerable`. For an HTTP request-plus-matcher chain (no captured-session support yet) the ceiling still stands: author it as stored coverage + a code-review finding and never present its `401`-driven `fixed` as "safe".
 - **Object-read (IDOR) chains need a real victim id or they stay `inconclusive`.** A route like `/api/thing/:id` returns `404` for a synthetic id, and `404` is never `fixed`. Add a `precondition` step that `extract`s a real id from a listing/creation endpoint into a `{{var}}` and reference it in the exploit path. Without a seeded real id the chain is permanent-inconclusive noise — don't author it.
-- `/api/v1/*` may not yet be exposed at the public edge. If a call to `api.launchguard.dev` returns 404 on the route, fall back to `https://recon-api-dev.centrive.ai` (LaunchGuard's own backend host).
+- **A `GET /rest/v1/rpc/<fn>` only works for a zero-argument function.** A Supabase RPC that requires parameters returns `404 PGRST202` to a GET (no matching empty-arg signature) — and `404` is never `fixed`, so the chain is permanently inconclusive. Confirm the function takes no required args before authoring a GET-RPC test; otherwise the RPC is a `mutation` (a POST with a body) and is gated, not an anonymous read.
+- `/api/v1/*` may not be exposed at the public edge **per route** — the fallback is route-by-route, not global. If a given `/api/v1/...` call to `api.launchguard.dev` returns 404, fall back to `https://recon-api-dev.centrive.ai` (LaunchGuard's own backend host) for that route. Note the chain routes (`/chains*`) fall back cleanly, but `/api/v1/connect` is a special case (its connect route must be deployed to the public edge, which is in progress) — see the SKILL.md Connect section. Don't assume the fallback rescues connect the way it rescues `/chains`.
+
+## 9. Captured-session credentials (bring-your-own-session, for script chains)
+
+The engine can mint anonymous and Supabase-anon identities on its own (§8), but it cannot log itself in as a real, already-provisioned user (a paying Pro account, an admin, a specific tenant). To test those, you **capture the user's logged-in browser session once** as a Playwright `storageState` and upload it. A **script** (Playwright) chain then references it and runs authenticated as that identity. This is the third credential mode, and the one that unlocks the authenticated / Pro-gated / cross-tenant tests the engine couldn't reach before.
+
+> A `storageState` is the JSON Playwright writes via `context.storageState()` — cookies + localStorage for a logged-in session. The user produces it from their own browser/test against their own app; you never mint or guess it. It is a real secret, so the API never echoes it back (see below).
+
+### POST /api/v1/chains/credentials (upload a captured session)
+
+`Authorization: Bearer $LAUNCHGUARD_API_KEY`. Body:
+```json
+{
+  "storageState": { "...": "Playwright storageState JSON" },
+  "label": "free-tier user",
+  "metadata": { "tier": "free", "tenant": "acme" }
+}
+```
+- `storageState` (required) — the Playwright `storageState` JSON.
+- `label` (optional, string) and `metadata` (optional) — the non-secret **identity** describing whose session this is. They may be sent flat (as above) OR nested under an `identity` object: `{ "storageState": ..., "identity": { "label": ..., "metadata": ... } }`. Both forms are accepted.
+- `metadata` must be a **FLAT object of string→string**. A nested object or a non-string value returns **400**. The keys/values are ARBITRARY and author-supplied — tiers, roles, plans, tenants, whatever describes the identity. The product interprets NONE of it; it is descriptive metadata for the human reading the test, nothing more.
+
+Success `201`:
+```json
+{ "credentialId": "<id>", "kind": "storage_state",
+  "identity": { "label": "free-tier user", "metadata": { "tier": "free", "tenant": "acme" } } }
+```
+The response NEVER returns the `storageState` or its ciphertext — only the `credentialId` and the non-secret `identity`. Store the `credentialId`; that is how a chain references the session.
+
+### Using a captured credential in a script chain
+
+A script chain references the credential by its `credentialId` at ingest; the chain then runs authenticated as that captured identity. The non-secret identity `{ label, metadata }` is shown in the UI per test and is returned (redacted — never the storageState) on `GET`/`LIST` as `spec.script.identity`. So when you list chains, an authenticated script chain tells you which identity it ran as.
+
+This is what lets you author "a free user can reach a Pro-only route", "a member can call an admin function", or "user A can read user B's tenant" as a real authenticated test, instead of leaving it as stored coverage + a code-review note (§8 credential ceiling). Anonymous (`auth: {}`) and Supabase-anon (`spec.env.anonKey`) modes still exist and are still the right choice when you don't need a real provisioned login; captured session is the third mode, for when you do.
+
+## 10. Durable disposition (mark a vulnerable verdict reviewed / intended)
+
+Some `vulnerable` verdicts are intended — an intended-public endpoint, a free-tier-is-the-product flow (the `methodology.md` Step 6 intended-public filter). Historically the only ways to stop re-litigating those were to drop the finding (losing the reasoning) or archive the chain (losing the coverage). **Disposition** is the durable, visible third option: mark the specific observed exposure as reviewed, with a reason, WITHOUT ever masking a future change.
+
+### The one property that holds
+
+"Accepted" means *this specific observed exposure is intended* — NOT "any future vulnerable verdict from this test is intended." A reviewed verdict can be suppressed; a *change the human never saw* is never suppressed. Acceptance is bound to both the test definition and the reviewed response shape (status, content-type, top-level JSON keys, size bucket), re-checked every run. If the response later exposes a NEW field, a changed content-type, or jumps a size bucket, acceptance no longer holds and the alarm comes back.
+
+### POST /api/v1/chains/:id/disposition
+
+`Authorization: Bearer $LAUNCHGUARD_API_KEY`, owner-scoped (same load/404 pattern as PATCH). Body:
+```json
+{ "disposition": "accepted" | "proposed" | null, "reason": "why this is intended" }
+```
+- `reason` is required and non-empty when setting; `disposition: null` clears it.
+- **An `lg_` API-key agent (you) may only set `"proposed"`** — a visible recommendation that does NOT suppress the alarm and does NOT count the chain green. Trying to set `"accepted"` from an API key returns **403** ("an API-key agent may only propose; a human must confirm acceptance"). Only a HUMAN principal (dashboard session / internal token) can confirm `"accepted"`, the suppressing state. The rationale is a real attack: chains return attacker-influenced response bodies into your context, so a confused/injected agent must not be able to self-clear a genuine vuln that every future session then trusts.
+- **409/404 if no `vulnerable` run exists** — you cannot accept (or propose acceptance of) a verdict that never reproduced.
+
+### What GET/LIST now return per chain
+
+Alongside the honest `lastResult`, every `GET /api/v1/chains/:id` and `LIST /api/v1/chains` row (and `/api/v1/context`) carries:
+- `disposition` — raw `accepted` | `proposed` | `null`.
+- `dispositionReason`, `dispositionBy` (`user:<uuid>` or `ai_agent:<keyId>`), `dispositionAt`.
+- `dispositionState` — the **load-bearing field you branch on**: `none` | `proposed` | `stale_spec` | `stale_escalation` | `honored`.
+- `effectiveStatus` — `green` | `red` | `review`.
+- `lastResult` — ALWAYS the honest run verdict, never overwritten by disposition.
+
+### Branch on `dispositionState`, NEVER on raw `disposition`
+
+This is how a future session honors a prior human decision instead of re-flagging an intended-public finding:
+- **`honored`** → acceptance holds; the response still matches what was reviewed. Do NOT re-flag. Read `dispositionReason` and move on. This chain counts green.
+- **`stale_spec`** → the test definition changed since acceptance; the prior acceptance no longer applies. Surface for human re-review — do not treat as resolved.
+- **`stale_escalation`** → the chain is still `vulnerable` AND the response ESCALATED beyond what was accepted (a new JSON key, a changed content-type, or a size-bucket jump). Treat as a likely **REAL new finding** — the endpoint now exposes more than the human ever signed off on. Surface loudly for re-review.
+- **`proposed`** → a recommendation is on record but NOT yet accepted (often by a prior agent). It does NOT suppress. You may reaffirm it, but you (an API key) CANNOT accept it — only a human confirms. Do not present it as resolved.
+- **`none`** → no disposition; handle the verdict normally.
+
+"All green" = every chain is `lastResult === 'fixed'` OR `dispositionState === 'honored'`. A `proposed` / `stale_spec` / `stale_escalation` chain still counts as red/review.
+
+### How this ties into the intended-public methodology
+
+`methodology.md` Step 6 tells you to FILTER OUT intended-public / free-tier-is-the-product findings (an aggregate `/api/stats` counter, the product's own free unauth scan) rather than ship them as scary verdicts. Disposition gives that filter a durable home: instead of silently dropping such a finding (and re-deciding it from scratch next session), **PROPOSE a disposition with a one-sentence reason** ("scan-status by id is an intended shareable capability"; "the free anonymous scan IS the product"). The human then one-click-confirms `accepted` in the UI (you can't self-accept). The suite goes honestly green, the reasoning is preserved, and the next agent reads `honored` + the reason instead of re-litigating it — while any real escalation still re-alarms via `stale_escalation`.
