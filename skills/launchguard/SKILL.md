@@ -144,7 +144,7 @@ curl -s -X POST https://recon-api.centrive.ai/api/skill/register-guard \
 
 ## Boundaries
 
-- The **free scan** does NOT perform exploitation, load testing, rate limit testing, credential stuffing, or any active attack. It probes and observes. (Authoring a **Bring Your Own Test** chain, see the section below, is a separate opt-in flow that reproduces ONE read-only exploit against a domain the user has verified they own, sending the minimum requests.)
+- The **free scan** does NOT perform exploitation, load testing, rate limit testing, credential stuffing, or any active attack. It probes and observes. (Authoring a **Bring Your Own Test** chain, see the section below, is a separate opt-in flow that reproduces ONE read-only exploit against the user's domain, sending the minimum requests.)
 - Does NOT do SQL injection, XSS testing, brute force, or DDoS simulation.
 - Does NOT do authenticated scanning — that requires Pro setup at launchguard.dev.
 - ALWAYS confirm target URL with user before scanning. Only scan domains they own.
@@ -215,7 +215,7 @@ curl -s "https://api.launchguard.dev/api/v1/context?targetHost=sandbox.example.c
 
 `/context` is now callable with an `lg_` key (dogfood-confirmed). Top-level shape (load-bearing fields; full contract in `chains-reference.md` §11):
 
-- `app`, `monitorId`, `dashboardUrl`, `verifiedOwnership`, `lastScan` (with `securityScore`, `status`).
+- `app`, `monitorId`, `dashboardUrl`, `lastScan` (with `securityScore`, `status`).
 - `inventory`: redacted STRUCTURAL facts the engine already discovered: `supabase` (`tablesDiscovered`, `tablesTested`, `tablesReadableAnon`, `tablesWithDataExposed`, `storageBucketsFound`, `rpcsFound`, plus a per-table `tables[]` with `anonReadable`), `endpoints` (`count`, `anonReachable[]` with method/path/status/auth), `subdomains`, `secretsFound`. No row samples, no secret values, no PII. This is what you would have re-reconned; read it instead.
 - `tests[]`: EVERY default engine check is projected here as a first-class, verdict-bearing test, ALONGSIDE the user's own `chain` tests. Each row has a `kind`:
   - `kind: "engine"`: a built-in scanner stack (e.g. `supabase` database exposure, `firebase`, `write_delete`, the synthesized `surface` hardening stack). Carries `state` (`always_on` / `on` / `off`) and `verdict` (`fixed` / `vulnerable` / `inconclusive` / `off`).
@@ -256,7 +256,7 @@ curl -s -X POST https://api.launchguard.dev/api/v1/coverage \
   -d '{"targetHost":"sandbox.example.com","stackId":"write_delete","enabled":true}'
 ```
 
-Toggles a toggleable engine stack on or off (merge-write, verified-gated). Live success shape:
+Toggles a toggleable engine stack on or off (merge-write). Live success shape:
 ```json
 { "ok": true, "app": "sandbox.example.com", "monitorId": "...", "stackId": "firebase", "toggleKey": "firebase",
   "enabled": false, "enabledTests": { "firebase": false, "write_delete": false },
@@ -266,7 +266,7 @@ Toggles a toggleable engine stack on or off (merge-write, verified-gated). Live 
 
 - ONLY the two toggleable engine stacks (`firebase`, `write_delete`) can be toggled. Toggling `enabled:false` then back to `true` is a clean reversible round-trip.
 - A non-toggleable stack returns **`409 { "error": "<id> is always-on and cannot be toggled", "toggleable": false }`**. This is the real toggle-rejection. ANY non-toggleable stack hits this (a core engine stack like `supabase`/`secrets`/`surface`, OR a non-toggleable Pro `byo_template` like `cost`). A `402` (Pro upsell) would only appear if a TOGGLEABLE stack ever required Pro you don't have, and none of the currently-toggleable stacks are Pro-gated, so the 402 path is not reachable today. Treat the 409 as the answer; mention 402 only as the hypothetical.
-- **Toggling `write_delete` on enables REAL INSERT / UPDATE / DELETE probes** against the (verified) domain. Only do this when the user explicitly wants destructive-access testing, and say so plainly first.
+- **Toggling `write_delete` on enables REAL INSERT / UPDATE / DELETE probes** against the domain. Only do this when the user explicitly wants destructive-access testing, and say so plainly first.
 - A toggle takes effect on the NEXT scan / deploy by default (`appliesOnNextScan: true`). Pass `{"rescanNow":true}` to run it immediately (subject to a per-monitor debounce).
 
 ### Then: author ONE tailored, business-logic test (from /context's recommendations)
@@ -282,7 +282,7 @@ Connecting alone is enough to show "Connected". But the moment that makes Launch
 2. **Translate that recommendation into a read-only custom test** (use the templates in "Bring Your Own Test" below, or the `byo_template` for an `author_from_template` item) and submit it **as a Guard**, set `"watched": true` in the ingest body. This flow is explicitly about establishing ongoing protection, so it is the one place you watch by default. Choose a positive marker that proves the rule is actually broken: a foreign row's owner id, a completion/job id, a paid resource field.
 3. Report the verdict. Because you submitted it `watched: true`, the chain is now a Guard: re-run on every deploy with regression alerts.
 
-Because the app is now **monitored**, a chain against it (read-only OR mutating) is allowed **without** the separate DNS / well-known domain proof: adding the app to the account is the ownership signal (trust-the-owner). Verification in the next section is only needed for a host that is NOT in the user's account. Keep this first test read-only, minimal (one ingest + one run), and tailored, a test that feels made for their app, not a generic check.
+Because the app is now **monitored**, a chain against it (read-only OR mutating) is allowed straight away: adding the app to the account is the ownership signal (trust-the-owner). Keep this first test read-only, minimal (one ingest + one run), and tailored, a test that feels made for their app, not a generic check.
 
 ---
 
@@ -303,7 +303,7 @@ Use this when the user wants to *prove* a specific exposure, not just scan. Trig
 >
 > **Never accept an `inconclusive`.** It means you haven't finished writing the test. The fix is always: READ the actual status + body, decide what the endpoint SHOULD do, and encode it into the matcher (`successStatusIn` / `fixedStatusIn` / a positive marker) so the run routes deterministically. Re-run until it resolves. The ONLY time you archive instead of fix is a genuinely unassertable test — the engine couldn't even issue the request, so there's no response to read (e.g. a cross-tenant chain dying at `no_credential_resolver` before any HTTP call). "I didn't define the expectation" is never that case.
 
-This is a real, opt-in capability, separate from the free scan. It runs only against a domain the user has **proven they own**, sends the **minimum** requests to prove the point, and in the read-only form below changes nothing on the target.
+This is a real, opt-in capability, separate from the free scan. It runs only against a domain the user has **added to their account**, sends the **minimum** requests to prove the point, and in the read-only form below changes nothing on the target.
 
 ### Proof vs Guard — does this test re-run on every deploy?
 
@@ -334,7 +334,7 @@ When the user says "clean up / manage / triage / dedupe / prune / review my test
 The default list is already the **ACTIVE set** — archived chains are excluded, so you're triaging only live coverage; add `?includeArchived=true` to also see archived rows (each carries `archived: true`), e.g. to find one to restore. And you can run a whole cleanup pass directly against `https://recon-api-dev.centrive.ai` — the public edge 404s `/api/v1/*`, so once any call falls back to the dev host, just stay there for the rest of the pass.
 
 **Archive a chain ONLY if one of these is true:**
-- **(a) Exact duplicate** of another *custom* chain — same `{method, path, target}` dedupe key, respecting the script-chain carve-out in Step 2.5 (dedupe script/Playwright chains by title or by diffing `spec.script`, **never** by their constant `(PLAYWRIGHT, "(script chain)", primary)` summary). Keep the better-titled / more-recently-passing one; archive the redundant twin.
+- **(a) Exact duplicate** of another *custom* chain — same `{method, path, target}` dedupe key, respecting the script-chain carve-out in Step 2 (dedupe script/Playwright chains by title or by diffing `spec.script`, **never** by their constant `(PLAYWRIGHT, "(script chain)", primary)` summary). Keep the better-titled / more-recently-passing one; archive the redundant twin.
 - **(b) Structurally unassertable** — the matcher has no positive marker (`jsonPathsPresent` / `bodyContainsAll` / `crossTenant` / `minTotalRows`), so the chain can only ever route to `fixed` or `inconclusive` and can NEVER reach `vulnerable`. It cannot prove the thing it claims to test. (Confirm by reading the `spec.assertion` via `GET /api/v1/chains/<id>` — don't infer from the row.)
 - **(c) Obsolete** — points at a dead/placeholder host or an endpoint that no longer exists (the path was removed). Verify before archiving, inside the **minimum-requests boundary** (one confirming probe, not a sweep): re-run the chain (`POST /chains/<id>/run`) or issue the single proving request by hand and read what comes back. Honest caveat: **a `404` to your probe is NOT proof the route was removed** — a live route can 404 you because it gates anonymous callers, wants a param/slug you didn't supply, or sits behind auth (denying you, not gone). Treat it obsolete only when you can tell removed-from-the-app apart from denying-you (the host itself is dead/placeholder, or sibling routes answer while this exact path is a framework-level not-found). Can't tell? KEEP, and flag the path for a human eyeball rather than archiving on a bare 404.
 
@@ -351,7 +351,7 @@ Archiving is reversible (`POST /api/v1/chains/<id>/restore`), but treat every ar
 The engine's coverage is no longer a guess. `GET /api/v1/context` exposes exactly what the default scanner covers: its `tests[]` projects every engine check (kind `engine` / `byo_template`) as a verdict-bearing test, and `recommendations[].action === "skip"` names each stack the engine already owns ("do NOT author a chain for this"). So you CAN now tell when a custom chain duplicates default-scanner coverage:
 
 - **Act on `recommendations.action === "skip"`.** If `/context` marks a stack engine-covered (e.g. `supabase`, `secrets`, `surface`), do not author a chain for it, and if the user already has a per-table custom chain duplicating it, the engine's coverage supersedes the per-table chain. The `supabase` engine stack tests EVERY table / bucket / RPC as the anon role (you'll see `inventory.supabase.tablesTested` covering all of them), so a per-table `anon-db-*` read chain is redundant with it; the engine's table-level coverage supersedes the per-table chain.
-- **Custom-chain-vs-custom-chain dedupe is unchanged.** Dedupe two custom chains by their `exploit` `{method, path, target}` key (Step 2.5), respecting the script-chain carve-out. That rule still stands; what changed is that engine coverage is now data you can read, not a guess you must avoid acting on.
+- **Custom-chain-vs-custom-chain dedupe is unchanged.** Dedupe two custom chains by their `exploit` `{method, path, target}` key (Step 2), respecting the script-chain carve-out. That rule still stands; what changed is that engine coverage is now data you can read, not a guess you must avoid acting on.
 
 ### The format: one request plus a matcher, submitted as JSON
 
@@ -387,25 +387,7 @@ export LAUNCHGUARD_API_KEY="<paste the key the user gave you>"   # then: -H "Aut
 
 > Across one run you'll touch several LaunchGuard hosts: the free scan submits to `www.launchguard.dev` and streams from a `*.centrive.ai` backend; the custom-test API lives at `api.launchguard.dev` / `recon-api-dev.centrive.ai`. Different services, same product — seeing more than one host is expected.
 
-### Step 2: Domain ownership
-
-A chain may only target a host the user has proven they own. If the user has already verified this domain on their account (e.g. they onboarded it earlier), the first request below returns it as already verified and you can skip straight to Step 3 — only run the challenge/publish/verify dance if it isn't verified yet:
-
-```bash
-# request a challenge
-curl -X POST https://api.launchguard.dev/api/v1/domains \
-  -H "Authorization: Bearer $LAUNCHGUARD_API_KEY" -H "Content-Type: application/json" \
-  -d '{"domain":"sandbox.example.com"}'      # -> { "challengeToken": "<token>" }
-
-# publish EITHER a DNS TXT record   launchguard-verify=<token>
-#         OR a file at              https://sandbox.example.com/.well-known/launchguard-verify.txt  containing <token>
-
-curl -X POST https://api.launchguard.dev/api/v1/domains/verify \
-  -H "Authorization: Bearer $LAUNCHGUARD_API_KEY" -H "Content-Type: application/json" \
-  -d '{"domain":"sandbox.example.com"}'      # -> { "verified": true }
-```
-
-### Step 2.5: list existing chains first (avoid duplicates)
+### Step 2: list existing chains first (avoid duplicates)
 
 Before authoring anything, list what already exists so you don't re-create a test that's already there. To see chains for one app, filter by host; **with NO `targetHost`, the list returns every chain across all monitored hosts — that is how you discover which apps the account has** (the only way to enumerate apps from the API):
 
@@ -580,7 +562,7 @@ Your `lg_` key gives you the FULL custom-test lifecycle on a domain's suite with
 | Run | `POST /api/v1/chains/<id>/run` | read-only runs freely; a mutation needs `{ "confirmMutation": true }` — see "Running mutation tests" |
 | Archive / restore | `DELETE /api/v1/chains/<id>` / `POST /api/v1/chains/<id>/restore` | reversible; restore can `409 titleCollision`. Apply the Cleanup checklist first |
 
-**Dedupe** by the `exploit` `{method,path,target}` key — but for script/Playwright chains use the carve-out in Step 2.5 (dedupe by title / `spec.script`, never the constant exploit summary). These calls work whether or not you authored the chain, as long as it's your account's.
+**Dedupe** by the `exploit` `{method,path,target}` key — but for script/Playwright chains use the carve-out in Step 2 (dedupe by title / `spec.script`, never the constant exploit summary). These calls work whether or not you authored the chain, as long as it's your account's.
 
 **Disposition (mark a `vulnerable` verdict intended):** `POST /api/v1/chains/<id>/disposition` with `{ "disposition": "proposed", "reason": "..." }`. An `lg_` API key may only **propose** — a human confirms `accepted`. Every row carries `dispositionState` (`none|proposed|stale_spec|stale_escalation|honored`); **branch on that, not raw `disposition`**: `honored` → don't re-flag, read the reason; `stale_spec`/`stale_escalation` → prior acceptance no longer holds, surface for human re-review. Full model in `chains-reference.md` §10.
 
@@ -601,4 +583,4 @@ You can still author, list, dedupe, modify, and archive mutation chains as usual
 
 ### Boundary
 
-Send the minimum requests to prove it, typically one ingest plus one run. Do not loop `/run` to load-test or hammer the endpoint. Only author chains for domains the user owns and has verified. The read-only form changes nothing on the target. Never escalate a read proof to a mutation without explicit user instruction.
+Send the minimum requests to prove it, typically one ingest plus one run. Do not loop `/run` to load-test or hammer the endpoint. Only author chains for domains the user owns. The read-only form changes nothing on the target. Never escalate a read proof to a mutation without explicit user instruction.

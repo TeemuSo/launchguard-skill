@@ -234,7 +234,7 @@ Optional body. For a read-only chain, no body is needed. For a `mutation` chain 
 
 Mutation specifics:
 - A mutation chain run WITHOUT `confirmMutation` returns `409 { "error": "...", "sideEffect": "mutation", "needsConfirmation": true }` and does not execute. That 409 is the confirmation gate, not a verdict.
-- A mutation chain run works against any domain the user MONITORS (has added to their account); trust-the-owner covers mutations the same as read-only runs, so no separate DNS verification is needed. A host that is not in the account still needs verified ownership, and a run against one returns `403`.
+- A mutation chain run works against any domain the user MONITORS (has added to their account); trust-the-owner covers mutations the same as read-only runs. A host that is not in the account returns `403`.
 - With `{ "confirmMutation": true }` against a monitored domain, it executes and returns the normal verdict, firing the real write/charge/OTP exactly once.
 
 Errors: `401`, `403` (chain belongs to another user, or a run targeting a host not in the user's account), `404`, `409` (chain disabled, or an unconfirmed mutation needing `confirmMutation`), `500`.
@@ -360,7 +360,6 @@ ONE call returns the engine's full posture for an app: inventory it already disc
   "app": "dev.launchguard.dev",
   "monitorId": "639d1d7b-...",
   "dashboardUrl": "https://launchguard.dev/app/639d1d7b-...",
-  "verifiedOwnership": true,
   "lastScan": { "scanId": "...", "finishedAt": "...", "securityScore": 79, "status": "complete" },
   "inventory": {
     "note": "Redacted structural facts. No row samples, no secret values, no raw response bodies, no PII.",
@@ -443,7 +442,7 @@ Each row also carries `categories[]` (the specific checks the stack runs) and `s
 
 ### POST /api/v1/coverage: toggle a default check
 
-Body `{ targetHost, stackId, enabled }`. Merge-write, verified-gated. Live success shape:
+Body `{ targetHost, stackId, enabled }`. Merge-write. Live success shape:
 
 ```json
 { "ok": true, "app": "dev.launchguard.dev", "monitorId": "...", "stackId": "firebase", "toggleKey": "firebase",
@@ -454,5 +453,5 @@ Body `{ targetHost, stackId, enabled }`. Merge-write, verified-gated. Live succe
 
 - ONLY the two toggleable engine stacks (`firebase`, `write_delete`) can be toggled. `enabled:false` then `enabled:true` is a clean reversible round-trip (verified: firebase off then on restored).
 - **Non-toggleable stack -> `409 { "error": "<id> is always-on and cannot be toggled", "toggleable": false }`.** This is the verified toggle-rejection and it covers ANY non-toggleable stack: a core engine stack (`supabase` / `secrets` / `surface`) OR a non-toggleable Pro `byo_template` like `cost`. A `402` (Pro upsell) would only apply if a TOGGLEABLE stack ever required Pro you don't have, and none of the currently-toggleable stacks are Pro-gated, so that 402 path is not reachable today. Document the 409 as the real rejection; treat 402 as a hypothetical only.
-- **Toggling `write_delete` on enables REAL INSERT / UPDATE / DELETE probes** against the verified domain. Only do this on explicit user request, and say so plainly first.
+- **Toggling `write_delete` on enables REAL INSERT / UPDATE / DELETE probes** against the domain. Only do this on explicit user request, and say so plainly first.
 - A toggle takes effect on the NEXT scan / deploy by default (`appliesOnNextScan: true`). Pass `{"rescanNow":true}` to run immediately (subject to a per-monitor debounce).
