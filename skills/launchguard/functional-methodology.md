@@ -21,6 +21,13 @@ security testing. The two-gate rule below is the cure.
 > chain in the "Bring Your Own Test" section of SKILL.md. The spec is a Playwright test the runner
 > executes in a headless browser. The Proof vs Guard distinction (`watched`) applies to it exactly as
 > it does to HTTP chains — see "Proof vs Guard" in `chains-reference.md`.
+>
+> **To INGEST one, follow `chains-reference.md` §12 — the script-chain ingest contract — exactly.** The
+> body is FLAT: top-level `artifact:"script"` + the Playwright spec as a top-level `script` STRING (it
+> is stored and read back at `spec.script.source`), with the `// @lg-intent:` / `// @lg-secure-when:`
+> header tags **declared in the source, colons required**. Do NOT send `spec.steps` / `spec.assertion`
+> — if you do, the HTTP runner silently wins and your script is never executed (§12's footgun). An
+> authenticated functional chain references a captured session by top-level `credentialId` (§9).
 
 ---
 
@@ -74,8 +81,8 @@ judged the page. (This is the `test.step()` authoring contract the UI surfaces.)
 ### Concrete example — "free user is paywalled on a Pro action"
 
 ```ts
-// @lg-intent functional
-// @lg-secure-when pass   // functional: PASS = the flow behaves as required
+// @lg-intent: functional
+// @lg-secure-when: pass   // functional: PASS = the flow behaves as required
 
 import { test, expect } from "@playwright/test";
 
@@ -128,9 +135,11 @@ ships silently. Author for determinism:
   deterministic. Author so a green run is green for the right reason, not because a retry papered over
   a race.
 - **Pin the identity.** A logged-in chain drives a **captured `storageState`**, not a live login (a
-  live magic-link login flakes on email delivery). The one exception is a dedicated login-flow chain
-  that completes a real magic-link round trip — keep that as its own single chain, and keep every
-  other authenticated chain on the captured session.
+  live magic-link login flakes on email delivery). Upload that session once as a credential and
+  reference it by top-level `credentialId` at ingest — the captured-session credential lifecycle is
+  `chains-reference.md` §9 (and §12 for where it sits in the script-chain body). The one exception is a
+  dedicated login-flow chain that completes a real magic-link round trip — keep that as its own single
+  chain, and keep every other authenticated chain on the captured session.
 
 ---
 

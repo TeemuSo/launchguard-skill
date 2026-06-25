@@ -455,3 +455,96 @@ Body `{ targetHost, stackId, enabled }`. Merge-write. Live success shape:
 - **Non-toggleable stack -> `409 { "error": "<id> is always-on and cannot be toggled", "toggleable": false }`.** This is the verified toggle-rejection and it covers ANY non-toggleable stack: a core engine stack (`supabase` / `secrets` / `surface`) OR a non-toggleable Pro `byo_template` like `cost`. A `402` (Pro upsell) would only apply if a TOGGLEABLE stack ever required Pro you don't have, and none of the currently-toggleable stacks are Pro-gated, so that 402 path is not reachable today. Document the 409 as the real rejection; treat 402 as a hypothetical only.
 - **Toggling `write_delete` on enables REAL INSERT / UPDATE / DELETE probes** against the domain. Only do this on explicit user request, and say so plainly first.
 - A toggle takes effect on the NEXT scan / deploy by default (`appliesOnNextScan: true`). Pass `{"rescanNow":true}` to run immediately (subject to a per-monitor debounce).
+
+## 12. Script / functional chain ingest contract (`artifact:"script"`)
+
+A **script chain** — a self-contained `@playwright/test` spec the runner executes in a headless browser — is ingested through the SAME `POST /api/v1/chains` endpoint as an HTTP chain, but with a DIFFERENT, **FLAT** body shape. This is how you author every `functional-methodology.md` chain and every captured-session authenticated test. Get it exactly right: the script-chain fields are **top-level on the body, NOT nested under `spec`.**
+
+### The discriminator: top-level `artifact: "script"`
+
+The engine picks the **script (Playwright) runner** vs the **HTTP request-plus-matcher runner** on exactly ONE field: the **top-level** `artifact`. `"script"` → the Playwright runner; absent or `"http"` (the default) → the HTTP runner. The script source, the optional credential, the side-effect, and the host allowlist are then read from **top-level body fields** — there is no `spec` object for a script chain; the validator assembles the stored `spec` itself.
+
+> **⛔ THE FOOTGUN THAT SILENTLY DISCARDS YOUR SCRIPT.** If you forget top-level `artifact:"script"` (or you nest the script under `spec`) AND you include an HTTP `spec.steps` + `spec.assertion`, the body validates as an ordinary HTTP chain, ingests `201`, and **the HTTP runner silently wins — your Playwright script is stored but never executed.** The run then tries to JSON-parse the HTML the browser would have rendered and routes to a false `inconclusive` (`exploit_body_unparseable`). For a script chain: set top-level `artifact:"script"`, put the spec in the top-level `script` string, and **do NOT send `spec.steps` / `spec.assertion` at all** — the Playwright `expect()`s ARE the matcher.
+
+### The ingest body (copy-paste, verified shape)
+
+```json
+{
+  "title": "Marketing home renders with a scan entry point",
+  "targetHost": "dev.launchguard.dev",
+  "severity": "low",
+  "source": "ai_agent",
+  "watched": false,
+  "artifact": "script",
+  "script": "// @lg-intent: functional\n// @lg-secure-when: pass\nimport { test, expect } from \"@playwright/test\";\n\ntest(\"home renders with a scan entry point\", async ({ page, baseURL }) => {\n  await test.step(\"reach the home page\", async () => {\n    await page.goto(\"/\", { waitUntil: \"domcontentloaded\" });\n    await expect(page).toHaveURL(new RegExp(`^${baseURL}/?$`));\n  });\n  await test.step(\"scan entry point is present\", async () => {\n    await expect(page.getByRole(\"button\", { name: /scan/i })).toBeVisible();\n  });\n});",
+  "sideEffect": "read_only",
+  "allowedTargets": { "primary": "dev.launchguard.dev" }
+}
+```
+
+`script` is a **single JSON string** carrying the whole `@playwright/test` spec (escape newlines as `\n`). Again: NO `spec` object, NO `spec.steps`, NO `spec.assertion`.
+
+### Required vs optional (all top-level)
+
+| Field | Req? | Notes |
+|---|---|---|
+| `title` | required | unique among your ACTIVE chains (same rule as HTTP, §7) |
+| `targetHost` | required | the monitored host; passes the SSRF / DNS guard |
+| `severity` | required | `critical` / `high` / `medium` / `low` |
+| `artifact` | **required, = `"script"`** | the discriminator; omit it and you get an HTTP chain (the footgun above) |
+| `script` | **required** | the `@playwright/test` spec as a STRING. Must contain a `// @lg-intent:` header, a `test(...)` block, and ≥1 `expect(...)`. Max 200 KB |
+| `source` | optional | defaults to `"ai_agent"` |
+| `watched` | optional | defaults `false` (Proof). See §0 |
+| `sideEffect` | optional | `"read_only"` or `"mutation"`; **defaults to `"mutation"`** (a browser click can write). A read-only functional render chain must set `"read_only"` explicitly so it can auto-run as a Guard |
+| `destructive` | optional | boolean; OR'd with the `// @lg-destructive: true` header. When true, forces `sideEffect:mutation` (manual-only) |
+| `credentialId` | optional | the opaque envelope id from `POST /api/v1/chains/credentials` (§9) — runs the script authenticated as that captured session |
+| `allowedTargets` | optional | `{ primary?, supabase?, api? }`; `primary` defaults to `targetHost`. Scripts use relative paths; the host resolves from here |
+
+> **`intent` and `secureWhen` are read from the SOURCE HEADER TAGS, not from body fields.** The validator parses them out of the `script` string (below). Declare them in the spec header — a top-level `intent` body field does not drive the build.
+
+### The header tags (parsed from the `script` source — the colon is mandatory)
+
+The validator scans for three `//`-comment tags ANYWHERE in the source. **The colon is required** — `// @lg-intent functional` (no colon) is REJECTED with `400 script must declare its intent`:
+
+- `// @lg-intent: security` **or** `// @lg-intent: functional` — **REQUIRED.** Drives the PASS→`fixed` / FAIL→`vulnerable` framing.
+- `// @lg-secure-when: pass` — **REQUIRED for `security` intent** (the test PASSES when the app is SECURE, so a broken run routes to `inconclusive`, never a false verdict). Optional for `functional`.
+- `// @lg-destructive: true` — optional; forces `sideEffect:mutation` (the same manual-only gate as a non-GET HTTP chain) for a functional script that writes state through the browser.
+
+Import allowlist is strict: a script may import ONLY `@playwright/test` (or `playwright` / `playwright/test`). Any other `import` / `require` / dynamic `import()` is rejected at ingest — move helpers inline.
+
+### Reference a captured session (authenticated script chain)
+
+Upload the session once (`POST /api/v1/chains/credentials`, §9) → get a `credentialId` → pass it as the **top-level `credentialId`** in the body above. The engine owner-binds the envelope to you, decrypts it in-memory at run time only, and runs the script as that real logged-in identity. The non-secret `identity` (`{ label, metadata }`) sealed in the credential is threaded onto `spec.script.identity`, so GET/LIST can show "runs as <email>" without ever decrypting.
+
+### What you get back (GET shape)
+
+`POST` returns `{ chainId, autoReplay, watched, sideEffect }` like any chain. `GET /api/v1/chains/<id>` returns the **stored, redacted** spec — and note the source now lives at **`spec.script.source`** (the validator moved your top-level `script` string into the assembled spec):
+
+```json
+{
+  "spec": {
+    "version": 2,
+    "artifact": "script",
+    "steps": [],
+    "assertion": { "successStatusIn": [], "fixedStatusIn": [] },
+    "auth": {},
+    "sideEffect": "read_only",
+    "allowedTargets": { "primary": "dev.launchguard.dev" },
+    "script": {
+      "source": "// @lg-intent: functional ...",
+      "intent": "functional",
+      "secureWhen": "pass",
+      "steps": ["reach the home page", "scan entry point is present"],
+      "identity": { "label": "free-tier user", "metadata": { "tier": "free" } },
+      "hasCredential": true
+    }
+  }
+}
+```
+
+- The Playwright source is **`spec.script.source`** on read-back (top-level `script` STRING at ingest, `spec.script.source` once stored). **Dedupe script chains by diffing THIS field** (or by title), never by the constant exploit summary — see SKILL.md Step 2 carve-out.
+- `spec.script.steps[]` are the `test.step("…")` titles parsed at ingest (the pre-run checklist), index-aligned with the live `step` SSE events.
+- `script.credential` (the encrypted session) is NEVER echoed — it is replaced by a `hasCredential` boolean. `script.identity` (non-secret) IS returned.
+- Every script chain's list-row `exploit` summary collapses to the constant `(PLAYWRIGHT, "(script chain)", primary)`.
+
+> **Redirect-gated endpoints: prefer a script chain.** The HTTP-matcher runner mis-routes a `302 → /login` to `inconclusive` (§4 "Known routing bug"). A script chain runs a real browser that follows the redirect, so an auth-gated render flow an HTTP matcher cannot verdict cleanly is exactly what a functional script chain is for.
