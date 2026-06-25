@@ -93,6 +93,8 @@ Note: a `mutation` chain never auto-runs, and an UNCONFIRMED `POST /api/v1/chain
 
 ## 5. Worked example: Supabase cross-tenant IDOR
 
+> **Per-table raw PostgREST anon-read chains are NO LONGER a default to author.** The `supabase` engine stack already tests every table / bucket / RPC as the anon role on every scan (visible in `/api/v1/context`: `recommendations.action === "skip"` for `supabase`, and `inventory.supabase.tablesTested` covering all tables; see §11). Re-authoring a plain `target:"supabase"` GET to `/rest/v1/<table>` with `minTotalRows: 1` just duplicates engine coverage. Reach for the anonymous-read template only for a GENUINE gap the engine cannot see: the §5.1 app-route-array case (the engine does NOT crawl arbitrary app routes' response bodies), or a specific table `/context` itself flagged as a gap. The cross-tenant IDOR below (a logged-in user crossing tenant boundaries via `spec.env.anonKey`) is also NOT something the engine does per-table, so it remains a legitimate authored test.
+
 Prove an anonymous PostgREST select returns rows owned by someone other than the authenticated replay identity:
 
 ```json
@@ -116,7 +118,9 @@ Prove an anonymous PostgREST select returns rows owned by someone other than the
 
 `{{auth.userId}}` resolves to the replay identity's user id. If at least one returned row has a different `user_id`, that is a proven cross-tenant leak and the verdict is `vulnerable`. An RLS denial envelope on a 2xx routes to `fixed` (the codes `42501` and `PGRST*` above are Supabase/PostgREST RLS-denial codes — real markers that the database refused the query).
 
-## 5.1. Worked example: anonymous JSON-array API mass-exposure
+## 5.1. Worked example: anonymous JSON-array API mass-exposure (the genuine gap)
+
+> **This is the legitimate remaining use of the anonymous-read template.** A raw per-table PostgREST anon read is already covered by the `supabase` engine stack (see §5's note), so do not re-author it. But the engine does NOT crawl arbitrary application routes' response bodies, so an app route leaking an array of records is a real gap the engine cannot see. This is where you author an anonymous-read chain.
 
 The most common real vibe-coder exposure is NOT a raw PostgREST table — it's an **app route that returns a JSON array of sensitive records without auth**: a `GET /api/widget/config?slug=acme` that answers an anonymous request with `[{ "name": "...", "phone": "..." }, ...]`. This is a first-class anonymous mass-exposure finding (names, emails, phone numbers, internal ids leaking to any stranger), and LaunchGuard renders it as the same structured "rows" evidence card on the dashboard as a PostgREST leak.
 
@@ -266,6 +270,7 @@ Errors:
 - **Object-read (IDOR) chains need a real victim id or they stay `inconclusive`.** A route like `/api/thing/:id` returns `404` for a synthetic id, and `404` is never `fixed`. Add a `precondition` step that `extract`s a real id from a listing/creation endpoint into a `{{var}}` and reference it in the exploit path. Without a seeded real id the chain is permanent-inconclusive noise — don't author it.
 - **A `GET /rest/v1/rpc/<fn>` only works for a zero-argument function.** A Supabase RPC that requires parameters returns `404 PGRST202` to a GET (no matching empty-arg signature) — and `404` is never `fixed`, so the chain is permanently inconclusive. Confirm the function takes no required args before authoring a GET-RPC test; otherwise the RPC is a `mutation` (a POST with a body) and is gated, not an anonymous read.
 - `/api/v1/*` may not be exposed at the public edge **per route** — the fallback is route-by-route, not global. If a given `/api/v1/...` call to `api.launchguard.dev` returns 404, fall back to `https://recon-api-dev.centrive.ai` (LaunchGuard's own backend host) for that route. Note the chain routes (`/chains*`) fall back cleanly, but `/api/v1/connect` is a special case (its connect route must be deployed to the public edge, which is in progress) — see the SKILL.md Connect section. Don't assume the fallback rescues connect the way it rescues `/chains`.
+- **Engine coverage IS now visible (this used to be a limitation, it no longer is).** Earlier guidance said the chains API exposed no scanner-origin signal, so a custom chain could not be deduped against default-scanner coverage. That is no longer true: `GET /api/v1/context` (§11) projects every engine check as a verdict-bearing `tests[]` row (kind `engine` / `byo_template`) and names each engine-covered stack via `recommendations.action === "skip"`. So you CAN now tell that a per-table anon-read custom chain duplicates the `supabase` engine stack (which covers all tables as anon) and that the `secrets` / `surface` stacks own their bins. Custom-chain-vs-custom-chain dedupe by the `exploit` key (§7) is still how you dedupe two authored chains; what changed is that engine coverage is data you can read, not a guess.
 
 ## 9. Captured-session credentials (bring-your-own-session, for script chains)
 
@@ -341,3 +346,113 @@ This is how a future session honors a prior human decision instead of re-flaggin
 ### How this ties into the intended-public methodology
 
 `methodology.md` Step 6 tells you to FILTER OUT intended-public / free-tier-is-the-product findings (an aggregate `/api/stats` counter, the product's own free unauth scan) rather than ship them as scary verdicts. Disposition gives that filter a durable home: instead of silently dropping such a finding (and re-deciding it from scratch next session), **PROPOSE a disposition with a one-sentence reason** ("scan-status by id is an intended shareable capability"; "the free anonymous scan IS the product"). The human then one-click-confirms `accepted` in the UI (you can't self-accept). The suite goes honestly green, the reasoning is preserved, and the next agent reads `honored` + the reason instead of re-litigating it — while any real escalation still re-alarms via `stale_escalation`.
+
+## 11. The bridge API: context, stacks, coverage
+
+These three read-only/config routes are the **bridge loop**: connect, then READ `/context` so you start expert (the engine already scanned the app), then ACT on its `recommendations[]`, then author / toggle only the gaps. SKILL.md gives the loop; this section is the full contract. All require `Authorization: Bearer $LAUNCHGUARD_API_KEY` and follow the same base-URL fallback as the chain routes (try `https://api.launchguard.dev`, switch to `https://recon-api-dev.centrive.ai` once any `/api/v1/...` call 404s). `/context` is `lg_`-key-callable (dogfood-confirmed); it is no longer human-session-only.
+
+### GET /api/v1/context?targetHost=<host>: the one call that makes you start expert
+
+ONE call returns the engine's full posture for an app: inventory it already discovered, every test's verdict (engine checks AND the user's own chains), the gaps, and the recommended actions. Read it BEFORE authoring anything; do not re-recon what the engine already knows. Abridged live shape (load-bearing fields):
+
+```json
+{
+  "app": "dev.launchguard.dev",
+  "monitorId": "639d1d7b-...",
+  "dashboardUrl": "https://launchguard.dev/app/639d1d7b-...",
+  "verifiedOwnership": true,
+  "lastScan": { "scanId": "...", "finishedAt": "...", "securityScore": 79, "status": "complete" },
+  "inventory": {
+    "note": "Redacted structural facts. No row samples, no secret values, no raw response bodies, no PII.",
+    "supabase": {
+      "present": true, "tablesDiscovered": 21, "tablesTested": 21,
+      "tablesReadableAnon": 21, "tablesWithDataExposed": 0,
+      "storageBucketsFound": 0, "publicStorageBuckets": 0,
+      "rpcsFound": 0, "rpcsCallableAnon": 0,
+      "tables": [ { "name": "analytics_events", "anonReadable": true } ]
+    },
+    "endpoints": { "count": 16, "truncated": false,
+      "anonReachable": [ { "method": "GET", "path": "/api/prices", "getStatus": 200, "postStatus": 405, "contentType": "", "authObserved": "none" } ] },
+    "subdomains": { "count": 0 },
+    "secretsFound": 0
+  },
+  "tests": [
+    { "id": "supabase", "kind": "engine", "bin": "data_exposure", "name": "Database exposure", "isCore": true, "toggleable": false, "state": "always_on", "verdict": "fixed", "coveredObjects": 21, "vulnerableObjects": 0 },
+    { "id": "firebase", "kind": "engine", "bin": "data_exposure", "name": "Firebase exposure", "isCore": false, "toggleable": true, "toggleKey": "firebase", "state": "on", "verdict": "inconclusive" },
+    { "id": "write_delete", "kind": "engine", "bin": "destructive_access", "name": "Write & delete testing", "isCore": false, "toggleable": true, "toggleKey": "write_delete", "state": "off", "verdict": "off" },
+    { "id": "surface", "kind": "engine", "bin": "surface_hardening", "name": "Surface hardening", "isCore": true, "toggleable": false, "synthesized": true, "state": "always_on", "verdict": "vulnerable", "findingsCount": 6 },
+    { "id": "cost", "kind": "byo_template", "bin": "cost_abuse", "name": "Cost abuse", "isCore": false, "toggleable": false, "requiresPro": true, "promptTemplateAvailable": true, "state": "not_run", "verdict": "not_run", "hasCustomChain": false },
+    { "id": "chain:<uuid>", "kind": "chain", "chainId": "<uuid>", "bin": null, "name": "...", "source": "ai_agent", "severity": "high", "sideEffect": "read_only", "enabled": true, "watched": true, "autoReplay": true, "state": "on", "verdict": "fixed", "lastTestedAt": "...", "dispositionState": "none", "effectiveStatus": "green" }
+  ],
+  "coverageGaps": [
+    { "bin": "cost_abuse", "stackId": "cost", "reason": "5 anon-reachable endpoint(s); cost-sink surface untested by any chain." },
+    { "bin": "payment_bypass", "stackId": "payment", "reason": "Paywall bypass is business-logic the engine cannot test; no chain authored." },
+    { "bin": "data_exposure", "stackId": "idor", "reason": "No chain covers IDOR / cross-tenant." },
+    { "bin": "broken_access", "stackId": "broken_access", "reason": "Authenticated route access untested (no credential bound); no chain authored." }
+  ],
+  "recommendations": [
+    { "action": "skip", "stackId": "supabase", "why": "Default Supabase stack covers every table/bucket/RPC as the anon role. Do NOT author per-table anon-db read chains." },
+    { "action": "skip", "stackId": "secrets", "why": "Secrets stack covers frontend key exposure. Do NOT author fe-scan secret chains." },
+    { "action": "skip", "stackId": "surface", "why": "Surface stack covers headers/CORS/source-maps/sensitive-files/cookies/frontend secrets. Do NOT author those." },
+    { "action": "toggle_on", "stackId": "write_delete", "why": "Off by default; mutation/delete coverage is absent. Enabling fires real INSERT/UPDATE/DELETE probes." },
+    { "action": "author_from_template", "stackId": "cost", "why": "5 anon-reachable endpoint(s); cost-sink surface untested by any chain.", "requiresPro": true },
+    { "action": "author_gap", "bin": "payment_bypass", "why": "Paywall bypass is business-logic the engine cannot test." },
+    { "action": "author_from_template", "stackId": "idor", "why": "No chain covers IDOR / cross-tenant.", "requiresPro": true },
+    { "action": "author_gap", "bin": "broken_access", "why": "Broken access control is business-logic the engine cannot test.", "requiresPro": true }
+  ],
+  "findings": {
+    "note": "Redacted: category, severity, server-synthesized title, structural location, ownerTest. No raw stored title, no evidence bodies, no secret values, no PII.",
+    "truncated": false,
+    "items": [ { "category": "missing_csp", "severity": "low", "title": "Missing security header: Content-Security-Policy", "location": { "kind": "endpoint", "name": "/" }, "ownerTest": "surface", "scanId": "..." } ]
+  },
+  "generatedAt": "..."
+}
+```
+
+Field notes:
+- `tests[]`: every default engine check is a first-class verdict-bearing test ALONGSIDE the user's `chain` tests. Branch on `kind`: `engine` (built-in stack, carries `state` `always_on`/`on`/`off` + `verdict`), `byo_template` (a gap with a ready prompt template, `state: "not_run"`, possibly `requiresPro`), `chain` (the user's authored test, carries `chainId` + `verdict` + `dispositionState` + `effectiveStatus`). A `synthesized: true` engine test (e.g. `surface`) is assembled from scan findings rather than run as a single probe.
+- `chain` rows carry the SAME disposition fields documented in §10 (`dispositionState`, `effectiveStatus`); branch on `dispositionState`, not raw `disposition`.
+- `inventory` is what you would have re-reconned (tables tested anon, anon-reachable endpoints, subdomains, secret count). Read it instead of re-scanning.
+
+### The four `recommendations[].action` values
+
+| `action` | Carries | What you do |
+|---|---|---|
+| `skip` | `stackId`, `why` | Engine already covers this bin. Author NOTHING for it. This is the anti-duplication discipline arriving as data. |
+| `toggle_on` | `stackId`, `why` | A toggleable engine stack (`firebase` / `write_delete`) is off; turn it on with `POST /api/v1/coverage`. |
+| `author_from_template` | `stackId`, `why`, optional `requiresPro` | A `byo_template` gap; author a chain from that stack's template (`cost`, `idor`, `payment`, `broken_access`). |
+| `author_gap` | `bin`, `why`, optional `requiresPro` | A freehand custom chain for something the engine genuinely cannot do (authed paywall, IDOR / cross-tenant, business-logic, cost-sink, SSRF). |
+
+### GET /api/v1/stacks[?targetHost=<host>]: the default-stack catalog
+
+Without `targetHost`, the catalog only. With `targetHost`, each stack ALSO carries the per-domain `state` + `verdict` (and `coveredObjects` / `vulnerableObjects` where relevant). The live stacks:
+
+| id | bin | kind | isCore | toggleable | requiresPro | notes |
+|---|---|---|---|---|---|---|
+| `supabase` | `data_exposure` | engine | yes | no | no | tests every table/bucket/RPC as anon |
+| `secrets` | `leaked_secrets` | engine | yes | no | no | frontend key exposure |
+| `firebase` | `data_exposure` | engine | no | **yes** (`toggleKey: "firebase"`) | no | toggleable |
+| `write_delete` | `destructive_access` | engine | no | **yes** (`toggleKey: "write_delete"`) | no | toggling on fires REAL INSERT/UPDATE/DELETE probes |
+| `cost` | `cost_abuse` | byo_template | no | no | yes | `promptTemplateAvailable` |
+| `payment` | `payment_bypass` | byo_template | no | no | **no** | `promptTemplateAvailable`, `testClass: "coming"` |
+| `idor` | `data_exposure` | byo_template | no | no | yes | `promptTemplateAvailable` |
+| `broken_access` | `broken_access` | byo_template | no | no | yes | `promptTemplateAvailable` |
+| `surface` | `surface_hardening` | engine | yes | no | no | synthesized (headers / CORS / source-maps / sensitive-files / cookies / frontend secrets) |
+
+Each row also carries `categories[]` (the specific checks the stack runs) and `scanFlags`.
+
+### POST /api/v1/coverage: toggle a default check
+
+Body `{ targetHost, stackId, enabled }`. Merge-write, verified-gated. Live success shape:
+
+```json
+{ "ok": true, "app": "dev.launchguard.dev", "monitorId": "...", "stackId": "firebase", "toggleKey": "firebase",
+  "enabled": false, "enabledTests": { "firebase": false, "write_delete": false },
+  "appliesOnNextScan": true,
+  "rescan": { "triggered": false, "note": "Takes effect on the next deploy scan. Pass {\"rescanNow\":true} to run immediately (subject to a per-monitor debounce)." } }
+```
+
+- ONLY the two toggleable engine stacks (`firebase`, `write_delete`) can be toggled. `enabled:false` then `enabled:true` is a clean reversible round-trip (verified: firebase off then on restored).
+- **Non-toggleable stack -> `409 { "error": "<id> is always-on and cannot be toggled", "toggleable": false }`.** This is the verified toggle-rejection and it covers ANY non-toggleable stack: a core engine stack (`supabase` / `secrets` / `surface`) OR a non-toggleable Pro `byo_template` like `cost`. A `402` (Pro upsell) would only apply if a TOGGLEABLE stack ever required Pro you don't have, and none of the currently-toggleable stacks are Pro-gated, so that 402 path is not reachable today. Document the 409 as the real rejection; treat 402 as a hypothetical only.
+- **Toggling `write_delete` on enables REAL INSERT / UPDATE / DELETE probes** against the verified domain. Only do this on explicit user request, and say so plainly first.
+- A toggle takes effect on the NEXT scan / deploy by default (`appliesOnNextScan: true`). Pass `{"rescanNow":true}` to run immediately (subject to a per-monitor debounce).

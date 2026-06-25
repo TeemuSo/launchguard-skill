@@ -176,22 +176,110 @@ curl -s -X POST https://api.launchguard.dev/api/v1/connect \
   -d '{"target": "TARGET_URL"}'
 ```
 
-Response: `{ "ok": true, "app": "sandbox.example.com", "monitorId": "<id>", "dashboardUrl": "https://launchguard.dev/app/<id>", "firstConnect": true, "watchedTests": 0 }`
+Response:
+```json
+{ "ok": true, "app": "sandbox.example.com", "monitorId": "<id>",
+  "dashboardUrl": "https://launchguard.dev/app/<id>", "firstConnect": true, "watchedTests": 0,
+  "coverageSummary": {
+    "defaultStacks": { "enabled": 4, "covered": 2, "vulnerable": 1, "off": 1 },
+    "customChains": { "watched": 13, "vulnerable": 0 },
+    "openGaps": 4,
+    "contextUrl": "/api/v1/context?targetHost=sandbox.example.com"
+  } }
+```
 
+- `coverageSummary` is the at-a-glance posture (how many default engine stacks are enabled/covered/vulnerable/off, how many of the user's own watched chains exist and how many are red, and how many open coverage gaps remain). `coverageSummary.contextUrl` hands you the EXACT `/context` call to make next: connect then read `/context` is the natural handoff. Do not author anything until you have read `/context` (see "Start expert: read /context first" below).
 - The user mints their `lg_` key (Developer / API keys) — the same key the chain endpoints use. Store it as `LAUNCHGUARD_API_KEY` (see "Get the user's API key" below for how to ask).
 - A `404` means they haven't added that app yet — tell them to add it at https://launchguard.dev/apps first, then reconnect.
 - Base URL: try `https://api.launchguard.dev`, fall back to `https://recon-api-dev.centrive.ai` on 404. **But `/api/v1/connect` is a special case:** its public-edge deploy is still in progress, so it may not be reachable on `api.launchguard.dev` yet (it works on the dev host). If unreachable on both, connect just isn't deployed everywhere — tell the user the link is pending and proceed with the scan/test rather than blocking. Don't assume the fallback rescues connect the clean way it rescues `/chains`.
 
-### Then: author ONE tailored, business-logic test
+### Start expert: read /context first (the bridge loop)
 
-Connecting alone is enough to show "Connected". But the moment that makes LaunchGuard worth keeping is a custom test specific to THIS app — the thing a generic scanner cannot write because it never read the code. After connecting:
+This is THE one new habit, and it is the FIRST thing you do after connecting and BEFORE you author anything. The old flow re-reconned the app and authored one chain per rule from scratch. You no longer do that. The engine already scanned this app: its coverage, inventory, and the gaps it cannot cover are all handed to you in one call. You START expert. You do NOT re-derive what the default scanner already knows; you READ it.
 
-1. **Read the project** and pick ONE business-logic rule that must hold from the outside. Prefer rules unique to the app:
-   - a plan / quota / usage limit (a non-paying request cannot exceed the free tier),
-   - a tenant-ownership / IDOR boundary (user A cannot read user B's record),
-   - a paywall (a Pro-only route or resource served to an unpaid request),
-   - an admin-only or internal route reachable by a guest.
-2. **Translate that rule into a read-only custom test** (see "Bring Your Own Test" below) and submit it **as a Guard** — set `"watched": true` in the ingest body. This flow is explicitly about establishing ongoing protection, so it is the one place you watch by default. Choose a positive marker that proves the rule is actually broken — a foreign row's owner id, a completion/job id, a paid resource field.
+The loop is five steps:
+
+1. **CONNECT**: `POST /api/v1/connect` (above). Returns `coverageSummary` and a `contextUrl`.
+2. **READ CONTEXT**: `GET /api/v1/context?targetHost=<host>`. ONE call returns everything you need: the engine's inventory, every test's verdict (engine checks AND the user's own chains), the gaps, and an explicit list of recommended actions. Read this before authoring a single chain.
+3. **ACT ON `recommendations[]`**: for each recommendation, do EXACTLY what its `action` field says (the four actions are below). The anti-duplication discipline now arrives as DATA: a `recommendations[].action === "skip"` tells you precisely what the engine already covers, so you author nothing for it. Trust `/context`; do not re-derive the engine.
+4. **RUN**: `POST /api/v1/chains/:id/run` on any chain you authored, for its tri-state verdict (unchanged).
+5. **WATCH**: ingest the chains you want guarded with `"watched": true` so they re-run on every deploy (unchanged).
+
+#### `GET /api/v1/context?targetHost=<host>`
+
+```bash
+curl -s "https://api.launchguard.dev/api/v1/context?targetHost=sandbox.example.com" \
+  -H "Authorization: Bearer $LAUNCHGUARD_API_KEY"
+# 404 on the public edge -> switch to https://recon-api-dev.centrive.ai for the rest of the session
+```
+
+`/context` is now callable with an `lg_` key (dogfood-confirmed). Top-level shape (load-bearing fields; full contract in `chains-reference.md` §11):
+
+- `app`, `monitorId`, `dashboardUrl`, `verifiedOwnership`, `lastScan` (with `securityScore`, `status`).
+- `inventory`: redacted STRUCTURAL facts the engine already discovered: `supabase` (`tablesDiscovered`, `tablesTested`, `tablesReadableAnon`, `tablesWithDataExposed`, `storageBucketsFound`, `rpcsFound`, plus a per-table `tables[]` with `anonReadable`), `endpoints` (`count`, `anonReachable[]` with method/path/status/auth), `subdomains`, `secretsFound`. No row samples, no secret values, no PII. This is what you would have re-reconned; read it instead.
+- `tests[]`: EVERY default engine check is projected here as a first-class, verdict-bearing test, ALONGSIDE the user's own `chain` tests. Each row has a `kind`:
+  - `kind: "engine"`: a built-in scanner stack (e.g. `supabase` database exposure, `firebase`, `write_delete`, the synthesized `surface` hardening stack). Carries `state` (`always_on` / `on` / `off`) and `verdict` (`fixed` / `vulnerable` / `inconclusive` / `off`).
+  - `kind: "byo_template"`: a gap with a ready prompt template you can author from (e.g. `cost`, `payment`, `idor`, `broken_access`). Carries `state: "not_run"`, `verdict: "not_run"`, `hasCustomChain`, and possibly `requiresPro`.
+  - `kind: "chain"`: the user's OWN custom test, with `chainId`, `severity`, `sideEffect`, `enabled`, `watched`, `verdict`, `dispositionState`, `effectiveStatus`.
+- `coverageGaps[]`: the bins with no chain covering them, each with a `bin`, `stackId`, and a human `reason`.
+- `recommendations[]`: the action list. THIS is the core of the loop (below).
+- `findings`: redacted scan findings: `category`, `severity`, a server-synthesized `title`, structural `location`, and the `ownerTest` (which stack/test owns it). No evidence bodies, no secret values, no PII.
+
+#### The four `recommendations[].action` values: do exactly what each says
+
+| `action` | Carries | What you do |
+|---|---|---|
+| `skip` | `stackId`, `why` | The engine already covers this. Do NOTHING: do not author a chain for it. This is the anti-duplication rule arriving as data (e.g. `supabase`, `secrets`, `surface` are engine-covered). |
+| `toggle_on` | `stackId`, `why` | A toggleable engine stack is off. Turn it on with `POST /api/v1/coverage` (below). Only `firebase` and `write_delete` are toggleable. |
+| `author_from_template` | `stackId`, `why`, optional `requiresPro` | A `byo_template` gap. Author a chain from that stack's template (e.g. `cost`, `idor`) using the templates in "Bring Your Own Test" below. |
+| `author_gap` | `bin`, `why`, optional `requiresPro` | A freehand custom chain for something the engine genuinely cannot test (an authed paywall, IDOR / cross-tenant, business-logic, a cost-sink, SSRF). Author it tailored to the app. |
+
+So: walk `recommendations[]`, skip what is `skip`, toggle what is `toggle_on`, and author one chain for each `author_from_template` / `author_gap` you decide to cover. In the Connect flow you typically pick ONE `author_gap` / `author_from_template` to author as a watched Guard (next subsection) rather than re-deriving a rule blind.
+
+#### `GET /api/v1/stacks[?targetHost=<host>]`: the default-stack catalog
+
+```bash
+# catalog only:
+curl -s "https://api.launchguard.dev/api/v1/stacks" -H "Authorization: Bearer $LAUNCHGUARD_API_KEY"
+# with per-domain state + verdict for each stack:
+curl -s "https://api.launchguard.dev/api/v1/stacks?targetHost=sandbox.example.com" \
+  -H "Authorization: Bearer $LAUNCHGUARD_API_KEY"
+```
+
+Lists the default stacks LaunchGuard ships (`supabase`, `secrets`, `firebase`, `write_delete`, `cost`, `payment`, `idor`, `broken_access`, `surface`) with each one's `bin`, `kind` (`engine` / `byo_template`), `isCore`, `toggleable`, `requiresPro`, the `categories[]` it checks, and `scanFlags`. With `targetHost`, each row ALSO carries the per-domain `state` + `verdict` (and `coveredObjects` / `vulnerableObjects` where relevant). Use it to understand what a stack does before toggling or authoring around it. Full table in `chains-reference.md` §11.
+
+#### `POST /api/v1/coverage`: toggle a default check on/off
+
+```bash
+curl -s -X POST https://api.launchguard.dev/api/v1/coverage \
+  -H "Authorization: Bearer $LAUNCHGUARD_API_KEY" -H "Content-Type: application/json" \
+  -d '{"targetHost":"sandbox.example.com","stackId":"write_delete","enabled":true}'
+```
+
+Toggles a toggleable engine stack on or off (merge-write, verified-gated). Live success shape:
+```json
+{ "ok": true, "app": "sandbox.example.com", "monitorId": "...", "stackId": "firebase", "toggleKey": "firebase",
+  "enabled": false, "enabledTests": { "firebase": false, "write_delete": false },
+  "appliesOnNextScan": true,
+  "rescan": { "triggered": false, "note": "Takes effect on the next deploy scan. Pass {\"rescanNow\":true} to run immediately (subject to a per-monitor debounce)." } }
+```
+
+- ONLY the two toggleable engine stacks (`firebase`, `write_delete`) can be toggled. Toggling `enabled:false` then back to `true` is a clean reversible round-trip.
+- A non-toggleable stack returns **`409 { "error": "<id> is always-on and cannot be toggled", "toggleable": false }`**. This is the real toggle-rejection. ANY non-toggleable stack hits this (a core engine stack like `supabase`/`secrets`/`surface`, OR a non-toggleable Pro `byo_template` like `cost`). A `402` (Pro upsell) would only appear if a TOGGLEABLE stack ever required Pro you don't have, and none of the currently-toggleable stacks are Pro-gated, so the 402 path is not reachable today. Treat the 409 as the answer; mention 402 only as the hypothetical.
+- **Toggling `write_delete` on enables REAL INSERT / UPDATE / DELETE probes** against the (verified) domain. Only do this when the user explicitly wants destructive-access testing, and say so plainly first.
+- A toggle takes effect on the NEXT scan / deploy by default (`appliesOnNextScan: true`). Pass `{"rescanNow":true}` to run it immediately (subject to a per-monitor debounce).
+
+### Then: author ONE tailored, business-logic test (from /context's recommendations)
+
+Connecting alone is enough to show "Connected". But the moment that makes LaunchGuard worth keeping is a custom test specific to THIS app, the thing a generic scanner cannot write because it never read the code. You no longer derive that rule blind: `/context` already told you the gaps. After reading `/context`:
+
+1. **Pick your ONE test from `recommendations[]` / `coverageGaps[]`** (the engine handed you the candidates). Choose an `author_gap` or `author_from_template` item: a rule the engine genuinely cannot cover, prioritized by impact and by what the `why` flags. These are the same business-logic boundaries that matter most:
+   - a plan / quota / usage limit (a non-paying request cannot exceed the free tier), usually a `cost_abuse` / `cost` recommendation,
+   - a tenant-ownership / IDOR boundary (user A cannot read user B's record), usually a `data_exposure` / `idor` recommendation,
+   - a paywall (a Pro-only route or resource served to an unpaid request), usually a `payment_bypass` / `payment` recommendation,
+   - an admin-only or internal route reachable by a guest, usually a `broken_access` recommendation.
+   Do NOT pick something `/context` marked `action: "skip"`: the engine already covers it.
+2. **Translate that recommendation into a read-only custom test** (use the templates in "Bring Your Own Test" below, or the `byo_template` for an `author_from_template` item) and submit it **as a Guard**, set `"watched": true` in the ingest body. This flow is explicitly about establishing ongoing protection, so it is the one place you watch by default. Choose a positive marker that proves the rule is actually broken: a foreign row's owner id, a completion/job id, a paid resource field.
 3. Report the verdict. Because you submitted it `watched: true`, the chain is now a Guard: re-run on every deploy with regression alerts.
 
 Because the app is now **monitored**, a chain against it (read-only OR mutating) is allowed **without** the separate DNS / well-known domain proof: adding the app to the account is the ownership signal (trust-the-owner). Verification in the next section is only needed for a host that is NOT in the user's account. Keep this first test read-only, minimal (one ingest + one run), and tailored, a test that feels made for their app, not a generic check.
@@ -254,13 +342,16 @@ The default list is already the **ACTIVE set** — archived chains are excluded,
 - A **mutation chain that has merely never run** (`lastResult:null` on a non-GET). Mutations never auto-run by design — `null` is the expected resting state, not a defect. Mark it "mutation, fires real side effects, run only on explicit request."
 - A chain whose unconfirmed `/run` returned **`409 needsConfirmation`** — that 409 is the mutation gate, not a failure.
 - A chain with a **`proposed` or `honored` `dispositionState`** — a human (or you) recorded that its verdict is intended/reviewed. `honored` counts green; `proposed` is awaiting a human's confirmation. Archiving it discards that decision. (`stale_spec` / `stale_escalation` mean re-review, not archive.)
-- A **passing `watched` guard just because it might overlap the built-in scanner.** Custom chains and the default scanner are *independent test sources* — see below; you cannot reliably tell that a custom chain duplicates scanner coverage, so do NOT archive one on a "the scanner probably covers this" guess.
+- A **passing `watched` guard just because it might overlap the built-in scanner**, UNLESS `/context` proves the overlap. Don't archive a passing watched guard on a guess. BUT if `GET /api/v1/context` marks that coverage engine-covered (`recommendations.action === "skip"` for the stack), or the chain is a per-table `anon-db-*` read duplicating the `supabase` engine stack (which tests ALL tables as anon), the engine's table-level coverage supersedes the per-table chain and you MAY skip / retire it. Trust `/context`: the anti-duplication rule now arrives as data, not a guess. See "Custom chains vs. the default scanner" below.
 
 Archiving is reversible (`POST /api/v1/chains/<id>/restore`), but treat every archive as if it weren't: report what you're archiving and why before you do it, and prefer leaving a borderline chain in place.
 
-### Custom chains vs. the default scanner — independent sources, no cross-dedupe
+### Custom chains vs. the default scanner: engine coverage is now visible via /context
 
-The always-on default scanner and the custom chains you author are **two independent test sources.** The chains API exposes **no scanner-origin signal** — a list row never tells you "the built-in scanner already covers this table/endpoint." So there is **no reliable way to dedupe a custom chain against default-scanner coverage today.** Concretely: a per-table anon-read custom guard may well overlap what the scanner checks, but you cannot prove it from the API, so **do NOT archive a passing `watched` guard on the assumption the scanner has it covered.** Only dedupe custom-chain-against-custom-chain, by the dedupe key (Step 2.5). This is the honest current limitation, not a capability — don't present cross-source dedupe as something you can do.
+The engine's coverage is no longer a guess. `GET /api/v1/context` exposes exactly what the default scanner covers: its `tests[]` projects every engine check (kind `engine` / `byo_template`) as a verdict-bearing test, and `recommendations[].action === "skip"` names each stack the engine already owns ("do NOT author a chain for this"). So you CAN now tell when a custom chain duplicates default-scanner coverage:
+
+- **Act on `recommendations.action === "skip"`.** If `/context` marks a stack engine-covered (e.g. `supabase`, `secrets`, `surface`), do not author a chain for it, and if the user already has a per-table custom chain duplicating it, the engine's coverage supersedes the per-table chain. The `supabase` engine stack tests EVERY table / bucket / RPC as the anon role (you'll see `inventory.supabase.tablesTested` covering all of them), so a per-table `anon-db-*` read chain is redundant with it; the engine's table-level coverage supersedes the per-table chain.
+- **Custom-chain-vs-custom-chain dedupe is unchanged.** Dedupe two custom chains by their `exploit` `{method, path, target}` key (Step 2.5), respecting the script-chain carve-out. That rule still stands; what changed is that engine coverage is now data you can read, not a guess you must avoid acting on.
 
 ### The format: one request plus a matcher, submitted as JSON
 
@@ -427,7 +518,13 @@ How it reads: `target: "supabase"` routes the request to `allowedTargets.supabas
 
 Validation note: because the engine signs up its OWN throwaway account for this template, you cannot reproduce that identity with a plain curl. For `crossTenant` / `anonKey` chains the `/run` verdict IS the validation; do not expect to confirm it by hand the way you would an anonymous read.
 
-Two Supabase read styles, pick by the question: to prove **"a logged-in user can cross tenant boundaries"**, use `spec.env.anonKey` (the engine signs up a fresh user, as above). To prove the simpler **"this table is readable by an anonymous client at all"**, send a `target: "supabase"` GET to `/rest/v1/<table>` with the target's public anon key in the request headers (`apikey` AND `authorization: Bearer <key>`, plus `"Prefer": "count=exact"`) and assert on `minTotalRows: 1`. This style works with EITHER a legacy `eyJ...` JWT or a new `sb_publishable_...` key, and it does NOT require Supabase Auth — so it is the correct cross-tenant/exposure test for Clerk and other non-Supabase-Auth apps. Both styles are valid; the first tests RLS for authenticated users (Supabase-Auth only), the second tests anonymous exposure (any app).
+**Do NOT author per-table `anon-db-*` read chains as a default.** The `supabase` engine stack already tests EVERY table / bucket / RPC as the anon role on every scan. You will see this directly in `/context`: `recommendations.action === "skip"` for `supabase` ("Default Supabase stack covers every table/bucket/RPC as the anon role. Do NOT author per-table anon-db read chains"), and `inventory.supabase.tablesTested` covering all discovered tables. Trust `/context`; do not re-derive the engine. Re-authoring a per-table anonymous PostgREST read is redundant coverage the engine already owns.
+
+Reserve the anonymous-read template for GENUINE gaps the engine cannot see:
+- **An app route returning a JSON array of sensitive records** (the most common real vibe-coder mass-exposure): the engine does NOT crawl arbitrary app-route bodies, so this IS a real gap. Author it with `jsonPathsPresent` on a sensitive field; full template in `chains-reference.md` §5.1.
+- **A specific table `/context` itself flagged as a gap** (e.g. one the engine somehow missed and surfaced in `coverageGaps[]` / a `recommendations` item).
+
+Two Supabase read styles still exist, pick by the question: to prove **"a logged-in user can cross tenant boundaries"**, use `spec.env.anonKey` (the engine signs up a fresh user, as above), which is RLS-for-authenticated-users testing the engine does not do per-table. To prove the simpler **"this table is readable by an anonymous client at all"** on a genuine gap, send a `target: "supabase"` GET to `/rest/v1/<table>` with the target's public anon key in the request headers (`apikey` AND `authorization: Bearer <key>`, plus `"Prefer": "count=exact"`) and assert on `minTotalRows: 1`. This anon style works with EITHER a legacy `eyJ...` JWT or a new `sb_publishable_...` key and does NOT require Supabase Auth, but only reach for it on a gap, since the engine already sweeps every table anonymously by default.
 
 > **API arrays count too — the most common real vibe-coder mass-exposure.** Anonymous mass-exposure is NOT only a PostgREST/`content-range` thing. The everyday case is an **app route returning a JSON array of sensitive records without auth** (e.g. `GET /api/widget/config?slug=x` → an array of names + phone numbers) — a first-class anon mass-exposure finding, rendered as the same structured "rows" evidence card on the dashboard. Assert it with **`jsonPathsPresent` on a sensitive field** (e.g. `["$[0].phone"]`), optionally plus `bodyContainsAll` on a known value — **NOT `minTotalRows`** (it needs a PostgREST `content-range` header a plain API array won't carry → it never fires → false `inconclusive`). Worked template: `chains-reference.md` §5.1.
 
@@ -464,7 +561,7 @@ Report the verdict plainly:
 - `fixed` means it is properly gated (401/403/429, or a proven-empty result, e.g. `access_denied: HTTP 401` or `exploit_absent: total 0 < 1`). Say so clearly.
 - `inconclusive` means the proof was ambiguous (404/5xx/unreachable/engine error). Do not claim either way.
 
-**Pointing the user at the dashboard:** identify the finding by its `targetHost` + `chainId` (both from the ingest/run response) and tell the user to open it from their LaunchGuard dashboard. Do NOT promise or construct a `https://launchguard.dev/app/<id>` link: an `lg_` API key cannot resolve that `<id>` — chain rows carry no `appId`, and `/api/v1/context` is human-session-only. (The `dashboardUrl` in the Connect response is the one exception — there the API hands you the URL; you never build it yourself.)
+**Pointing the user at the dashboard:** do NOT hand-build a `https://launchguard.dev/app/<id>` link from a chain row, because chain rows carry no `appId`, so you cannot construct that `<id>` yourself. Instead, get the real `dashboardUrl` from the API and pass that: both `POST /api/v1/connect` and `GET /api/v1/context` return a ready `dashboardUrl` for the app. So call `/context` (it is `lg_`-key-callable) or read the connect response, and point the user at the `dashboardUrl` it hands you. Always use the API-provided URL; never build the link from a chain row.
 
 ### Managing the test suite via the API
 
@@ -472,6 +569,9 @@ Your `lg_` key gives you the FULL custom-test lifecycle on a domain's suite with
 
 | Operation | Endpoint | Note |
 |---|---|---|
+| Read coverage (START HERE) | `GET /api/v1/context?targetHost=<host>` | the bridge call: inventory + every test's verdict + gaps + `recommendations[]`. Read before authoring. See `chains-reference.md` §11 |
+| Stack catalog | `GET /api/v1/stacks[?targetHost=<host>]` | default-stack catalog; with `targetHost`, per-domain `state` + `verdict`. See `chains-reference.md` §11 |
+| Toggle a default check | `POST /api/v1/coverage { targetHost, stackId, enabled }` | toggle `firebase` / `write_delete` only; non-toggleable stacks `409`; `write_delete` fires real mutations; takes effect next scan unless `rescanNow` |
 | Create | `POST /api/v1/chains` | defaults to a Proof; `"watched": true` ingests a Guard |
 | List / discover apps | `GET /api/v1/chains[?targetHost=<host>]` | omit `targetHost` to list every app's chains; add `?includeArchived=true` to include archived rows |
 | Inspect one | `GET /api/v1/chains/<id>` | full `spec` — diff this to confirm a dedupe, especially for script chains |

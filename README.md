@@ -82,6 +82,23 @@ You: "Set up monitoring"
   → Agent enables Ongoing Guard (auto re-scan on every deploy)
 ```
 
+## Connect and the bridge loop
+
+When you connect your project to LaunchGuard (`"connect this to LaunchGuard"`, `"watch this app on every deploy"`), the agent does not re-recon your app. It starts expert: LaunchGuard already scanned it, and one call hands the agent the whole picture. The loop:
+
+1. **Connect**: a benign handshake links your Claude Code to your app. The response includes a coverage summary and the exact context call to make next.
+2. **Read context**: `GET /api/v1/context` returns the engine's inventory (tables tested, anon-reachable endpoints), every test's verdict (built-in engine checks AND your own custom tests), the open coverage gaps, and a list of recommended actions. The agent starts from this instead of re-scanning.
+3. **Act on recommendations**: each recommendation tells the agent exactly what to do. `skip` what the engine already covers (no duplicate tests), `toggle_on` a default check that is off, `author_from_template` a ready test for a gap, or `author_gap` a freehand business-logic test the engine cannot write (a paywall, a cross-tenant boundary, a cost-sink).
+4. **Run**: the authored test returns a clear verdict (vulnerable / fixed / inconclusive).
+5. **Watch**: guarded tests re-run on every deploy and alert on regression.
+
+New endpoints behind the loop:
+- `GET /api/v1/context`: the engine's coverage, inventory, gaps, and recommended actions in one call.
+- `GET /api/v1/stacks`: the catalog of default checks LaunchGuard runs, with per-app state and verdicts.
+- `POST /api/v1/coverage`: toggle a default check (e.g. Firebase, write/delete probing) on or off for an app.
+
+The point: the agent never re-derives what the scanner already knows. The anti-duplication discipline arrives as data, so you get tailored coverage for the gaps and nothing redundant.
+
 ## Zero config
 
 - No API key required for scanning
