@@ -41,10 +41,12 @@ matcher genuinely can't express some of these — don't fake it:
   injection assertions don't exist). Inspect the code and report a finding; never a chain that fakes
   a verdict.
 
-**Dedupe rule (do NOT author these):** **B6, B7, D2, F1, F2, F3 are ENGINE-covered.** `/context` is
-authoritative (`action: "skip"` for `supabase`, `secrets`, `surface`; `write_delete` is toggled on),
+**Dedupe rule (do NOT author these):** **B6, D2, F1, F2, F3 are ENGINE-covered.** `/context` is
+authoritative (`action: "skip"` for `supabase`, `secrets`, `surface`),
 but as a fast filter: never author a per-table anon read, a frontend-secret scan, or a
-header/CORS/source-map check — the engine owns them.
+header/CORS/source-map check — the engine owns them. (B7 anon-write is NO LONGER a "skip": don't toggle
+the engine `write_delete` stack unattended — **author a parked mutation chain and surface it** instead;
+see B7.)
 
 **The per-app "fit" is the whole point.** A generic scanner proves the ENGINE floor. It cannot author
 the CHAIN rows, because it never read the code: it doesn't know which table is the tenant table, which
@@ -103,16 +105,16 @@ public feed answering anonymously is intended-public and is NOT a finding).
 - **Kind:** CHAIN.
 - **LaunchGuard expression:** `crossTenant` matcher via `spec.env.anonKey` (Supabase-Auth) or a captured-session script for Clerk/Auth0 (`CHAINS.md` Step 3b; `reference/chains-reference.md` §5, §9). The engine `idor` is a `byo_template` (partial).
 - **Severity:** critical
-- **⚠️ SAFETY — a keyless cross-tenant run that reads `fixed` proves NOTHING (credential ceiling).** The `idor`/cross-tenant mint is **`requiresPro`**, and it also fails on a non-Supabase-Auth app or an `sb_publishable_` key. When the second identity **can't be minted**, the request goes out **keyless** → the app 401s → the run reads **`fixed`** with **`credentialProvenance: "none"`** (or a body like `"No API key found"`). **That is NOT a pass — it's a credential ceiling (an unmet precondition), so cross-tenant isolation was never actually tested.** **Rule:** before trusting any cross-tenant/authed `fixed`, CHECK `credentialProvenance` (and the body). If it's `none` / keyless, treat the result as **inconclusive / untested** — never "isolation verified". **Never report cross-tenant isolation as PASS when the second identity wasn't actually provisioned.** Cross-reference `reference/methodology.md` Step 7 (#6, the credential ceiling).
+- **⚠️ Credential ceiling — the engine now returns `inconclusive` (not a false `fixed`) when the second identity can't be provisioned.** The `idor`/cross-tenant mint is **`requiresPro`**, and also fails on a non-Supabase-Auth app or an `sb_publishable_` key. When the second identity **can't be minted**, the cross-tenant boundary was never actually exercised — and the backend now reports that honestly as **`inconclusive`** (`credentialProvenance: "none"`, or a body like `"No API key found"`), **no longer a misleading `fixed`**, so you won't be fooled into reporting a pass. **Don't drop the invariant — AUTHOR the test anyway and SURFACE it**, so the user can run it with the credential it needs (a captured session) or on Pro. The captured test you hand over IS the value. (Still sanity-check `credentialProvenance` on any cross-tenant `fixed`: a real provisioned identity is what makes a `fixed` trustworthy.) Cross-reference `reference/methodology.md` Step 7 (#6, the credential ceiling).
 - **Fit to THIS app:** from `inventory.supabase.tables[]` + the code, pick a real tenant table and its **owner column** (`user_id` / `org_id` / `tenant_id`) — that column is `crossTenant.ownerJsonPath`. For an app-route IDOR, find a `/api/<resource>/:id` route and seed a real **foreign** id via a `precondition` extractor (`reference/methodology.md` Steps 2–4 — an unguessable UUID with no id-leak surface caps at medium). Pre-flight: `eyJ...` anon key + Supabase Auth, else use a captured-session script — and apply the credential-ceiling rule above to whatever verdict comes back.
 
 ### B2 — Cross-tenant WRITE / DELETE
 - **SHOULD:** A can't mutate or delete B's object.
 - **Transform → violation:** swap identity on a write to B's object; the write succeeds → RED.
-- **Kind:** CHAIN (mutation, gated).
-- **LaunchGuard expression:** non-GET → manual-confirm run (`409 needsConfirmation` is healthy parked coverage). Self-provision B's object as a `precondition`.
+- **Kind:** CHAIN (mutation — **author it; it parks until the user confirms**).
+- **LaunchGuard expression:** non-GET → the run is **gated**: an unconfirmed `/run` returns `409 needsConfirmation` and the chain sits as healthy parked coverage that **fires nothing**. Self-provision B's object as a `precondition`. **AUTHOR + submit it** — do NOT skip it because it mutates; authoring/storing it fires zero real writes, and the captured, unfired test IS the value.
 - **Severity:** critical
-- **Fit to THIS app:** pick a write route from the code (`PATCH`/`DELETE /api/<resource>/:id`, an RPC). As a `precondition`, self-provision B's object so you're writing to a row you don't own; the exploit step writes to it as A. Fire only on explicit `{"confirmMutation": true}` — never loop, never auto-run.
+- **Fit to THIS app:** pick a write route from the code (`PATCH`/`DELETE /api/<resource>/:id`, an RPC). As a `precondition`, self-provision B's object so you're writing to a row you don't own; the exploit step writes to it as A. **Author it, submit it, and SURFACE it to the user** — e.g. *"I've prepared a test that proves whether a stranger can overwrite or delete another customer's X. It makes a real change, so LaunchGuard won't run it until you explicitly confirm — run it whenever you're ready."* It fires only on explicit `{"confirmMutation": true}` — never loop, never auto-run on a live app.
 
 ### B3 — Bypass-authorization-schema / forced browsing
 - **SHOULD:** a URL not in A's UI is inaccessible to A.
@@ -148,8 +150,10 @@ public feed answering anonymously is intended-public and is NOT a finding).
 
 ### B7 — Anonymous WRITE / DELETE
 - **SHOULD:** anon can't INSERT / UPDATE / DELETE.
-- **Kind:** **ENGINE** (`write_delete`, toggleable). Toggle it on via `POST /api/v1/coverage`; do **NOT** author. Toggling on fires REAL mutation probes — say so first.
+- **Kind:** CHAIN (mutation — **author it; it parks until the user confirms**). *(An engine `write_delete` stack also exists, but toggling it on via `POST /api/v1/coverage` fires REAL INSERT/UPDATE/DELETE probes immediately — so don't toggle it unattended; prefer the parked author+surface path below, which fires nothing until the user says go.)*
+- **LaunchGuard expression:** author an anonymous (no-auth) non-GET to the write route. As a mutation the run is **gated**: an unconfirmed `/run` returns `409 needsConfirmation` and it sits as healthy parked coverage that **fires nothing**. AUTHOR + submit it — the captured, unfired test IS the value; don't skip it for being destructive.
 - **Severity:** critical
+- **Fit to THIS app:** pick a write/delete route the code exposes to anonymous callers (a public form POST, an unauthenticated `PATCH`/`DELETE`). **Author it, submit it, and SURFACE it to the user** — e.g. *"I've prepared a test that proves whether a stranger with no account can write to or delete your X. It makes a real change, so LaunchGuard won't run it until you confirm — run it whenever you're ready."* It fires only on explicit `{"confirmMutation": true}` — never loop, never auto-run on a live app.
 
 ---
 
@@ -232,11 +236,11 @@ public feed answering anonymously is intended-public and is NOT a finding).
 ### G1 — Unauth can't trigger paid / outbound work
 - **SHOULD:** an anonymous caller can't trigger paid AI / email / SMS / compute work.
 - **Transform → violation:** POST the paid route anonymously; a paid-work marker (completion id, queued job id, message id) returns → RED.
-- **Kind:** CHAIN (`cost` `byo_template`) on a sandbox you own — **else CODE-REVIEW (the default on a production app).**
-- **⚠️ SAFETY — proving G1 by sending the request ACTUALLY FIRES the real paid/outbound work.** The whole point of the marker (the completion / job / message id) is that it proves the paid call *ran* — i.e. the proving request really sends the email / broadcast / SMS, really burns the AI credits, really queues the compute. **On a PRODUCTION app with real users, DO NOT fire it.** A single proving POST to a route like `/api/broadcast` or `/api/send` can blast your real user list or spend real money. **Default disposition on prod = DOWNGRADE G1 to CODE-REVIEW:** inspect that the route requires auth **and** rate-limits **before** the paid call is reached, and report from the code — do not author a fired chain. Only **send** the proving request against a **sandbox / throwaway you own**, with a **benign payload** (your own address, a no-op message). The metamorphic idea still holds; it just gets witnessed on a sandbox, never on live users.
-- **LaunchGuard expression:** *sandbox only* — anon POST to the route, positive marker proves the work actually ran. *On prod* — no chain; code-review that auth + rate-limit gate the paid call.
+- **Kind:** CHAIN (mutation / `cost` `byo_template` — **author it; it parks until the user confirms**), plus a code-review of the gate.
+- **⚠️ SAFETY — proving G1 by sending the request ACTUALLY FIRES the real paid/outbound work, so the agent must NEVER auto-fire it on a live app.** The whole point of the marker (the completion / job / message id) is that it proves the paid call *ran* — i.e. the proving request really sends the email / broadcast / SMS, really burns the AI credits, really queues the compute. A single proving POST to a route like `/api/broadcast` or `/api/send` can blast your real user list or spend real money. **But the safe disposition is NOT "silently drop it to code-review" — it's AUTHOR + SURFACE.** A POST route is a mutation, so the chain **parks** (`409 needsConfirmation`, fires nothing) until the user explicitly confirms — authoring/storing it sends zero real work. So: **author the chain, submit it, and hand it to the user** — e.g. *"I've prepared a test proving whether a stranger can trigger your paid/outbound X. Running it sends one real request, so you decide when and whether to fire it — ideally against a sandbox."* Alongside, still **code-review** that the route requires auth **and** rate-limits before the paid call (that read needs no firing). Only **fire** the proving request yourself against a **sandbox / throwaway you own**, with a **benign payload** (your own address, a no-op message) — never against live users, never without the user's confirmation. *(Caveat: if the paid route is a GET that spends, the mutation gate does NOT apply — a read-only GET auto-replays and would fire the spend on every deploy — so don't author that one; code-review it instead.)*
+- **LaunchGuard expression:** anon POST to the route, positive marker proves the work actually ran. As a non-GET it parks behind `409 needsConfirmation` — **authored + surfaced**, fired only on the user's explicit confirm (ideally a sandbox). Plus a code-review of the auth + rate-limit gate.
 - **Severity:** high
-- **Fit to THIS app:** from `inventory.endpoints` / the code, find the AI/email/SMS/compute route (`/api/chat`, `/api/generate`, `/api/send`, `/api/broadcast`). Decide the disposition FIRST per the safety caveat: prod app → code-review the gate; sandbox you own → POST it anonymously with a benign payload, marker = the completion / job / message id that proves the paid call ran. **Intended-public filter:** if the founder *intends* a free anonymous tier (the free scan IS the product), that is NOT a finding — distinguish "an attacker abuses expensive work" from "the founder offers this for free".
+- **Fit to THIS app:** from `inventory.endpoints` / the code, find the AI/email/SMS/compute route (`/api/chat`, `/api/generate`, `/api/send`, `/api/broadcast`). **Default on prod = author the parked mutation chain and surface it to the user** (the captured, unfired test is the value), and code-review the gate — not "silently drop to code-review." Marker = the completion / job / message id that proves the paid call ran. Fire it yourself only against a **sandbox you own** with a benign payload. **Intended-public filter:** if the founder *intends* a free anonymous tier (the free scan IS the product), that is NOT a finding — distinguish "an attacker abuses expensive work" from "the founder offers this for free".
 
 ### G2 — Free tier / quota can't be exceeded
 - **SHOULD:** a non-paying request can't exceed the free tier or quota.
@@ -256,10 +260,13 @@ public feed answering anonymously is intended-public and is NOT a finding).
 
 ## Dedupe at a glance — what NOT to author
 
-`/context` is authoritative, but as a fast filter: **B6, B7, D2, F1, F2, F3 are ENGINE-covered** — do
-not author custom chains for them (`recommendations[].action === "skip"`, or toggle for `write_delete`).
-Everything in the **CHAIN** rows is a genuine gap to fit and author. Everything in **CODE-REVIEW** is a
-finding, not a chain.
+`/context` is authoritative, but as a fast filter: **B6, D2, F1, F2, F3 are ENGINE-covered** — do
+not author custom chains for them (`recommendations[].action === "skip"`). (B7 anon-write is the
+exception: don't toggle the engine `write_delete` stack unattended — **author a parked mutation chain
+and surface it** instead.) Everything in the **CHAIN** rows is a genuine gap to fit and author —
+including the DESTRUCTIVE ones (B2, B7, G1): you **author + surface** them and the user's confirmation
+runs them; you never skip them and never auto-fire them on a live app. Everything in **CODE-REVIEW** is
+a finding, not a chain.
 
 > **Honest scope of a clean audit.** Proving every CHAIN row `fixed` and clearing every CODE-REVIEW
 > item means the *fundamental* (intent-free) layer holds — the floor is working. It says nothing about

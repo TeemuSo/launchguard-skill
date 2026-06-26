@@ -14,6 +14,17 @@ or a code-review finding. This goes WAY deeper than the free scan.
 > can.** That fitting is this audit's whole job, and it is exactly why a clean scan is the *start* of
 > assurance, not the end.
 
+> **Principle — author + surface, never skip, never auto-fire.** LaunchGuard's value is the captured
+> test you own and decide to run. For a **DESTRUCTIVE** or **CREDENTIAL-GATED** invariant — a cross-tenant
+> or anon write/delete (B2/B7), a paid/outbound call (G1), an authed cross-tenant read whose identity
+> can't be provisioned (B1/B3/B5) — the agent **AUTHORS the test and SURFACES it to you**; it does NOT
+> skip it, fake it, or auto-fire it. **You (or your explicit confirmation) RUN it.** This is safe because
+> the product enforces it server-side: a mutation chain never auto-runs (an unconfirmed run returns
+> `409 needsConfirmation` and fires nothing), and a credential-gated test now returns `inconclusive`
+> (not a false `fixed`) when the needed identity wasn't provisioned. The captured, unfired test *is* the
+> deliverable. **The agent must never auto-fire a mutation/destructive request on a live app** — it
+> authors and hands it to you; your confirmation is what runs it.
+
 ---
 
 ## When to run
@@ -49,16 +60,19 @@ cover.
 Open `reference/invariants.md` and work it top to bottom (A Auth → B Authz → C Session → D Data
 exposure → E Injection → F Surface → G Cost/abuse). For **each** invariant, branch on its **kind**:
 
-### If the invariant is ENGINE (B6, B7, D2, F1–F3)
+### If the invariant is ENGINE (B6, D2, F1–F3)
 Confirm it via `/context` and move on — do NOT author anything.
 - Find the owning stack's row in `tests[]` (`supabase`, `secrets`, `surface`) or the `recommendations[]`
   entry. `verdict: "fixed"` → engine-covered and clean. `verdict: "vulnerable"` → the scan already found
   it; fold it into the report, don't re-prove it.
-- For `write_delete` (B7), if it's `off`, offer to toggle it on (`POST /api/v1/coverage`) — and say
-  plainly that enabling it fires REAL INSERT/UPDATE/DELETE probes.
 - Record each as **engine-covered** in the report.
 
-### If the invariant is CHAIN (A1–A3, B1–B5, C1–C2, D1, D3, G1–G2)
+> **B7 (anon write/delete) is no longer an engine-toggle item.** Don't toggle the engine `write_delete`
+> stack unattended — it fires REAL INSERT/UPDATE/DELETE probes immediately. Treat B7 as a mutation CHAIN
+> below: **author a parked mutation chain and surface it** to the user, whose explicit confirmation runs
+> it (it fires nothing until then). That captured, unfired test is the value — don't skip it.
+
+### If the invariant is CHAIN (A1–A3, B1–B5, B7, C1–C2, D1, D3, G1–G2)
 This is the core of the audit. For each:
 1. **FIT it to THIS app.** Read the invariant's **"Fit to THIS app"** line, then READ the app — its
    code (if a local checkout exists) and the `/context` `inventory` (discovered routes, tables, owner
@@ -85,15 +99,25 @@ This is the core of the audit. For each:
    — a witnessed GREEN, the win. `inconclusive` = the matcher didn't describe the response; fix it and
    re-run, don't report it either way. A mutation chain's `409 needsConfirmation` is healthy parked
    coverage, not a failure.
-   - **⚠️ SAFETY — a cross-tenant / authed `fixed` can be a credential ceiling, NOT a pass.** The
-     second-identity mint (`crossTenant` / `spec.env.anonKey` / captured-session) is `requiresPro` and also
-     fails on non-Supabase-Auth or `sb_publishable_` keys. When it can't be minted, the request goes out
-     **keyless** → the app 401s → the run reads **`fixed`** with **`credentialProvenance: "none"`** (or a
-     body like `"No API key found"`). **That is NOT "isolation verified" — it's an unmet precondition, so
-     the boundary was never tested.** Before reporting ANY cross-tenant/authed `fixed` as clean, CHECK
-     `credentialProvenance` (and the body): if it's `none` / keyless, mark the invariant **inconclusive /
-     untested** (a code-review-only item), never PASS. See `reference/methodology.md` Step 7 (#6),
-     `reference/invariants.md` B1, and `CHAINS.md` Step 3b.
+   - **For a DESTRUCTIVE chain (mutation — B2, B7, G1 on prod): author + submit + SURFACE, do NOT fire.**
+     A non-GET parks behind `409 needsConfirmation` and fires nothing, so storing it is zero-risk. Don't
+     skip it for being destructive and don't auto-fire it on a live app — hand it to the user with a plain
+     line of what it proves (e.g. *"I've prepared a test that proves whether a stranger can write/delete
+     your X; it makes a real change, so it won't run until you confirm — run it whenever you're ready"*)
+     and let their explicit `{"confirmMutation": true}` run it. That captured, unfired test is the value;
+     report it as **authored — awaiting your run**, not skipped. (Fire it yourself only against a sandbox
+     you own, with a benign payload.)
+   - **⚠️ Credential ceiling — the engine now returns `inconclusive` (not a false `fixed`) when the
+     second identity can't be provisioned.** The second-identity mint (`crossTenant` / `spec.env.anonKey` /
+     captured-session) is `requiresPro` and also fails on non-Supabase-Auth or `sb_publishable_` keys. When
+     it can't be minted, the cross-tenant/authed boundary was never exercised — and the backend now reports
+     that honestly as **`inconclusive`** (`credentialProvenance: "none"`, or a body like `"No API key
+     found"`), **no longer a misleading `fixed`**, so you won't be fooled into reporting a pass. **Don't
+     drop the invariant — AUTHOR the test anyway and SURFACE it as "authored — awaiting your run"**, so the
+     user can run it with the credential it needs (a captured session) or on Pro. (Still sanity-check
+     `credentialProvenance` on any cross-tenant `fixed` — a real provisioned identity is what makes a
+     `fixed` trustworthy.) See `reference/methodology.md` Step 7 (#6), `reference/invariants.md` B1, and
+     `CHAINS.md` Step 3b.
    - **Host-redirect footgun on the app's own routes.** A monitored `targetHost` can redirect (apex→`www`,
      `http`→`https`). `allowedTargets.primary` must byte-match the FINAL host, so a chain aimed at the apex
      can 307→`www` and read a false `inconclusive`. Target the canonical / resolved host (e.g. `www.…`).
@@ -121,6 +145,13 @@ Produce one comprehensive report covering **every** invariant, each with its dis
 - **vulnerable** — a chain reproduced the exploit. Show the marker, the honest severity, and the fix
   (lean on the chain's `interpretation.fixHint`; close the loop per `CHAINS.md` Step 5).
 - **code-review finding** — a CODE-REVIEW invariant you flagged from the source, cited file + line.
+- **authored — awaiting your run** — a DESTRUCTIVE or CREDENTIAL-GATED invariant (a cross-tenant or anon
+  write/delete B2/B7, a paid/outbound call G1 on prod, or a cross-tenant/authed read whose identity
+  couldn't be provisioned): you **authored and submitted the test and surfaced it to the user**, but did
+  NOT fire it. A mutation parks safely (`409 needsConfirmation`, fires nothing) until the user confirms;
+  a credential-gated read reads `inconclusive` until run with the needed credential/Pro. This is a real,
+  honest disposition — the captured test the user owns and decides to run — **NOT a "skipped" item.**
+  Name what it proves and tell the user that they (or their explicit confirmation) run it whenever ready.
 - **not-applicable** — the invariant has no surface in this app (e.g. no path-taking param for B4, no
   paid route for G1). Say why.
 
@@ -131,9 +162,11 @@ artifacts (with their verdicts). Then promote the chains worth watching to Guard
 > CODE-REVIEW item is clean, say: *the fundamental security floor holds — cross-tenant isolation, auth
 > gates, cost boundaries, and token handling are all proven against your real routes.* But it is the
 > floor, not "fully secure": business-logic correctness (whether a given role *should* see a given
-> record) is per-app intent that still needs you, the owner. Don't oversell a green sweep, and never
-> present a black-box `fixed` that was really a credential ceiling (`reference/methodology.md` Step 7)
-> as "safe".
+> record) is per-app intent that still needs you, the owner. Don't oversell a green sweep. A
+> credential-gated test the engine couldn't provision now surfaces honestly as `inconclusive` (not a
+> false `fixed`, `reference/methodology.md` Step 7) — so don't count it as "safe"; report it as
+> **authored — awaiting your run** and hand it to the user with the credential/Pro it needs. (Still
+> sanity-check `credentialProvenance` on any cross-tenant `fixed`.)
 
 ---
 
