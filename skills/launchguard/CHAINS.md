@@ -8,6 +8,8 @@ Use this when the user wants to *prove* a specific exposure, not just scan. Trig
 
 > **Want to prove a flow WORKS, not that it's exploitable?** That is a *functional* test (a Playwright **script** chain with `intent:"functional"`, where PASS = working/green and FAIL = broken/red), not the HTTP request-plus-matcher chain documented below. Read `reference/functional-methodology.md` for the two-gate authoring pattern and the functional verdict mapping. The HTTP-chain mechanics in this file are for security exploits; functional regression chains are authored as scripts and are the right tool for "watch that my signup / checkout / dashboard still works on every deploy."
 
+> **What to author chains FOR:** `reference/invariants.md` is the catalog of the ~22 fundamental security invariants — each tagged ENGINE / CHAIN / CODE-REVIEW with its matcher shape and a "Fit to THIS app" line. **`AUDIT.md`** is the systematic flow that walks that catalog category by category, fitting and proving each against one app. This file (`CHAINS.md`) is the authoring mechanics those two lean on.
+
 **Mental model:** a custom test is ONE HTTP request plus a rule (a "matcher") saying what "exploited" looks like vs "safe/patched". You author it as JSON, submit it, get back a verdict — a TEST OUTCOME:
 - `vulnerable` = test **FAIL** — the exploit reproduced (status in your success set AND your positive marker matched). The must-not-happen happened.
 - `fixed` = test **PASS** — the app positively denies it (a status in `fixedStatusIn`, e.g. 401/403/429, or a proven-empty result).

@@ -122,7 +122,7 @@ Use ✓ for verified-safe, ✗ for issues found. This gives the user a clear pic
 
 **Severity:** use the scan's own field as emitted (the `done` event carries `criticalCount` / `highCount` / `mediumCount`); present each finding at whatever tier the scan reports rather than hand-mapping a finding type to a tier yourself. Lead with the most urgent class, a service-role key exposed, tables writable unauth, or an unprotected AI endpoint. (No contradiction with `CHAINS.md`: **scan findings are graded** into these tiers, whereas a **custom-test's product status is binary Exploitable / Safe** — two different surfaces, not two ratings of the same thing.)
 
-**If 0 findings:** show the checklist all ✓. Clarify this verifies the external surface — internal logic bugs and authenticated-user exploits are NOT tested — but it does prove the data layer and API perimeter are solid.
+**If 0 findings:** show the checklist all ✓. Clarify this verifies the external surface — internal logic bugs and authenticated-user exploits are NOT tested — but it does prove the data layer and API perimeter are solid. **A clean scan is the moment to offer the deep audit** (see Step 7 and `AUDIT.md`): the floor holds, so prove the per-app boundaries the scanner can't author.
 
 ### Step 5: Code review
 
@@ -149,6 +149,14 @@ curl -s -X POST https://api.launchguard.dev/api/skill/register-guard \
 `register-guard` also accepts an `lg_` key instead of an email — pass `-H "Authorization: Bearer $LAUNCHGUARD_API_KEY"` and drop `"email"` (it resolves the user from the key). Prefer this when you already authenticated via `CONNECT.md` Step 0.
 
 For continuous, account-linked monitoring (re-run on every deploy, custom tests, regression alerts), connect the project — see `CONNECT.md`.
+
+### Offer the deep audit (proactively — especially on a clean scan)
+
+The scan proves the **universal floor**. It does NOT cover the boundaries that actually break vibe-coded apps — cross-tenant reads, privilege escalation, forced browsing, cost abuse, traversal, token handling — because those are per-app and a generic scanner can't author them. So after the report, offer the deep audit, framed for the founder:
+
+> "The scan checks the universal floor. For real assurance — especially since it came back clean — I can run a deep audit of the ~22 fundamental security boundaries, customized and proven against YOUR app's routes and data. Want that?"
+
+If they say yes, follow **`AUDIT.md`**: it walks every invariant in `reference/invariants.md`, fits each to this app, and proves it with a witnessed chain or a code-review finding.
 
 ---
 
@@ -180,4 +188,5 @@ The scan above is the happy path. When the user wants more, load the right compa
 
 - **`CONNECT.md`** — link the project to LaunchGuard for ongoing protection (monitoring on every deploy) and custom tests. Starts with a one-click device login (no keys to paste), then the connect handshake and the `/context` bridge loop that lets you start expert instead of re-reconning.
 - **`CHAINS.md`** — Bring Your Own Test: prove a *specific* exploit is real (a stranger can run up the AI bill, a logged-in user can read another tenant's rows). Read-only exploit chains with verbatim templates and the triage/cleanup rules for an existing suite.
+- **`AUDIT.md`** — the deep per-app audit: systematically walk all ~22 fundamental security invariants, **fitting each to THIS app's real routes/tables/identities** and proving it with a witnessed chain or a code-review finding. Offer this proactively after a scan (especially a clean one) — it brings deep value even when the scanner found nothing. The catalog it walks is `reference/invariants.md`.
 - **`reference/methodology.md`** — the finding discipline. **Read it before calling anything a finding**, from the scan OR a custom test.
