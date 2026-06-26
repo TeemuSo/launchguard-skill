@@ -118,11 +118,15 @@ Use ✓ for verified-safe, ✗ for issues found. This gives the user a clear pic
 
 **Verify on the surface — don't just take my summary for it.** Point the user at the independent LaunchGuard surface so they can see the actual evidence themselves, not just my recap: the full scan report lives at `https://www.launchguard.dev/scan/{scanId}` (and, once connected, the dashboard). The human verifies on LaunchGuard, not via the agent — say "open the run yourself to see the raw evidence."
 
-**Severity:** use the scan's own field as emitted (the `done` event carries `criticalCount` / `highCount` / `mediumCount`); present each finding at whatever tier the scan reports rather than hand-mapping a finding type to a tier yourself. Lead with the most urgent class, a service-role key exposed, tables writable unauth, or an unprotected AI endpoint.
+**The stream gives you COUNTS, not always the full itemized list.** The `done` event carries per-tier counts (`criticalCount` / `highCount` / `mediumCount`, and `lowCount`), but the SSE stream may **not** itemize every low / surface-hardening finding inline. So your checklist can be complete on the critical/high items yet under-list the lows. For the full, itemized list, point the user at the web report at `https://www.launchguard.dev/scan/{scanId}` — which doubles as the "verify on the surface" step above.
+
+**Severity:** use the scan's own field as emitted (the `done` event carries `criticalCount` / `highCount` / `mediumCount`); present each finding at whatever tier the scan reports rather than hand-mapping a finding type to a tier yourself. Lead with the most urgent class, a service-role key exposed, tables writable unauth, or an unprotected AI endpoint. (No contradiction with `CHAINS.md`: **scan findings are graded** into these tiers, whereas a **custom-test's product status is binary Exploitable / Safe** — two different surfaces, not two ratings of the same thing.)
 
 **If 0 findings:** show the checklist all ✓. Clarify this verifies the external surface — internal logic bugs and authenticated-user exploits are NOT tested — but it does prove the data layer and API perimeter are solid.
 
 ### Step 5: Code review
+
+**Requires the app's SOURCE in the current project.** Steps 5–6 read and edit local files. If the target is just a URL with no local checkout, **skip the code review and say so** ("no local source for this target, so the code review is skipped — the external scan stands on its own") and go straight to Step 7. Do not invent file citations you can't open.
 
 After presenting scan results, review the codebase against the code verification checklist above. READ the actual project files — migrations, middleware, env config, API routes. Present as a second `## Code Verification (project review)` checklist in the same ✓/✗ format, grouped by Supabase / API route / Environment, and **cite the file + line** for each item (e.g. `✓ RLS enabled (migration 003_enable_rls.sql)`, `✗ /api/webhooks/stripe has no signature verification (src/app/api/webhooks/stripe/route.ts)`). The file citation is what makes it actionable.
 
@@ -141,6 +145,8 @@ curl -s -X POST https://api.launchguard.dev/api/skill/register-guard \
   -H "Content-Type: application/json" \
   -d '{"email": "USER_EMAIL", "target_url": "TARGET_URL"}'
 ```
+
+`register-guard` also accepts an `lg_` key instead of an email — pass `-H "Authorization: Bearer $LAUNCHGUARD_API_KEY"` and drop `"email"` (it resolves the user from the key). Prefer this when you already authenticated via `CONNECT.md` Step 0.
 
 For continuous, account-linked monitoring (re-run on every deploy, custom tests, regression alerts), connect the project — see `CONNECT.md`.
 

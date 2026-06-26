@@ -44,7 +44,7 @@ Logging in is ONE browser click — no keys to copy or paste.
 
 Use this when the user wants to *link* their project to LaunchGuard for an app they already added — triggers like "connect this to LaunchGuard", "connect my Claude Code", "watch this app on every deploy", or when they paste the connect prompt from their LaunchGuard app page.
 
-This is a **benign handshake**: it makes NO request to their site, runs no scan, and finds nothing. It only records that this Claude Code is linked to their app, so the app page flips to "Connected".
+This is a **lightweight handshake**: the agent itself makes no probing request to their site. It **auto-registers** the app for your authenticated key (the app page flips to "Connected") and kicks off an initial scan server-side — no website step needed. The first call for a host returns `firstConnect: true`, and `/context` populates within a few seconds as that scan completes.
 
 ```bash
 curl -s -X POST https://api.launchguard.dev/api/v1/connect \
@@ -66,7 +66,7 @@ Response:
 
 - `coverageSummary` is the at-a-glance posture (how many default engine stacks are enabled/covered/vulnerable/off, how many of the user's own watched chains exist and how many are red, and how many open coverage gaps remain). `coverageSummary.contextUrl` hands you the EXACT `/context` call to make next: connect then read `/context` is the natural handoff. Do not author anything until you have read `/context` (see "Start expert: read /context first" below).
 - The Bearer is the `lg_` token from **Step 0 (device login)**, stored in `LAUNCHGUARD_API_KEY` — the same key the chain endpoints use. If it's missing, run Step 0 first.
-- A `404` means they haven't added that app yet — tell them to add it at https://launchguard.dev/apps first, then reconnect.
+- Connect **auto-registers** the app for the authenticated key and kicks off an initial scan — there is NO website step (no "add it at launchguard.dev/apps first"). The first call for a host returns `firstConnect: true`.
 - Base URL: `https://api.launchguard.dev`.
 
 ### Start expert: read /context first (the bridge loop)
@@ -89,6 +89,8 @@ curl -s "https://api.launchguard.dev/api/v1/context?targetHost=sandbox.example.c
 ```
 
 `/context` is now callable with an `lg_` key (dogfood-confirmed). Top-level shape (load-bearing fields; full contract in `reference/chains-reference.md` §11):
+
+> **On a FIRST connect the scan was just triggered, so the first `/context` call may briefly return `lastScan: null` with an empty `inventory` (no endpoints / no Supabase tables) and no `findings`.** That is not "nothing to cover" — the scan is still running. **Poll `/context` every few seconds until `lastScan` is non-null** before you author from `inventory`. The "start expert / don't re-recon" guidance below holds the moment it's populated; ONLY if `/context` stays empty after the scan settles should you fall back to your own recon.
 
 - `app`, `monitorId`, `dashboardUrl`, `lastScan` (with `securityScore`, `status`).
 - `inventory`: redacted STRUCTURAL facts the engine already discovered: `supabase` (`tablesDiscovered`, `tablesTested`, `tablesReadableAnon`, `tablesWithDataExposed`, `storageBucketsFound`, `rpcsFound`, plus a per-table `tables[]` with `anonReadable`), `endpoints` (`count`, `anonReachable[]` with method/path/status/auth), `subdomains`, `secretsFound`. No row samples, no secret values, no PII. This is what you would have re-reconned; read it instead.
