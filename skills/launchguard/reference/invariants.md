@@ -64,10 +64,10 @@ public feed answering anonymously is intended-public and is NOT a finding).
 ### A1 — Credentials only over TLS
 - **SHOULD:** the login/token request only succeeds over TLS; an `http://` attempt redirects or refuses.
 - **Transform → violation:** swap `https`→`http` on the login request; login still succeeds → RED.
-- **Kind:** CHAIN / CODE-REVIEW (header-level HSTS is the engine `surface` stack).
-- **LaunchGuard expression:** HTTP chain to the `http://` auth endpoint; `fixedStatusIn:[301,302,308,400]` (must redirect or refuse).
+- **Kind:** **CODE-REVIEW** (header-level HSTS / HTTP→HTTPS redirect is the engine `surface` stack).
+- **LaunchGuard expression:** **NOT an authorable chain.** The chain runner's `target`/host enums carry **no scheme** — `allowedTargets` hosts are bare hostnames the engine fetches over HTTPS, so there is no way to author an `http://` request that asserts the downgrade. Don't try to encode the `https`→`http` swap as a chain; it can't be expressed. A1's transport is the engine `surface` stack (the HSTS header) **plus a code-review** of the HTTP→HTTPS redirect config.
 - **Severity:** high
-- **Fit to THIS app:** from the `/context` inventory / code, pick the *real* auth route — the Supabase GoTrue path (`/auth/v1/token`), a NextAuth `/api/auth/*`, your own `/api/login` — not a guessed `/login`. If there's no plaintext listener to hit (host is HTTPS-only at the edge), this collapses to a code-review of the HSTS / redirect config and the `surface` stack; say so, don't fake a chain.
+- **Fit to THIS app:** confirm the engine `surface` stack reports HSTS present (via `/context`), then code-review that the edge force-redirects `http://`→`https://` (host config / framework redirect / `Strict-Transport-Security` with a sane `max-age`). There's no plaintext listener you can hit through the matcher, so say "engine `surface` + code-review", don't fake an `http://` chain.
 
 ### A2 — Protected route denies a missing/empty token
 - **SHOULD:** a route that reads/writes user data returns 401/403 when the token is stripped.
@@ -76,6 +76,7 @@ public feed answering anonymously is intended-public and is NOT a finding).
 - **LaunchGuard expression:** anon HTTP chain to the protected route; `successStatusIn:[200]` + a forward-looking marker on a protected field, `fixedStatusIn:[401,403]`. Expected NOW = `fixed` (the gate denies you).
 - **Severity:** high
 - **Fit to THIS app:** pick a route that returns the signed-in user's own data from the code / `inventory.endpoints` (a profile, an account, a dashboard list). The marker is a field the leaked body WOULD carry if the gate broke (`$.email`, `$.user_id`, an account field). Author as a Guard so a future regression flips it `vulnerable`.
+  - **Host-redirect footgun (the app's OWN routes):** the monitored `targetHost` may itself redirect — apex→`www`, `http`→`https`. A chain's `allowedTargets.primary` must **byte-match the FINAL host**, so a request aimed at the apex can 307→`www` and the run reads **`inconclusive`** (a redirect, not your gate). For a route on the app's own host, target the **canonical / resolved** host (e.g. `www.…`) — supply it via the free-form `target` to that resolved host. (This is the same redirect-routing limit called out as the backend/Supabase footgun in `CHAINS.md`, surfaced here because it bites the app's own routes too.)
 
 ### A3 — Forged / none-alg / expired token not honored
 - **SHOULD:** a crafted, expired, or downgraded token is rejected; the public anon key is never accepted where a privileged one is expected.
@@ -102,7 +103,8 @@ public feed answering anonymously is intended-public and is NOT a finding).
 - **Kind:** CHAIN.
 - **LaunchGuard expression:** `crossTenant` matcher via `spec.env.anonKey` (Supabase-Auth) or a captured-session script for Clerk/Auth0 (`CHAINS.md` Step 3b; `reference/chains-reference.md` §5, §9). The engine `idor` is a `byo_template` (partial).
 - **Severity:** critical
-- **Fit to THIS app:** from `inventory.supabase.tables[]` + the code, pick a real tenant table and its **owner column** (`user_id` / `org_id` / `tenant_id`) — that column is `crossTenant.ownerJsonPath`. For an app-route IDOR, find a `/api/<resource>/:id` route and seed a real **foreign** id via a `precondition` extractor (`reference/methodology.md` Steps 2–4 — an unguessable UUID with no id-leak surface caps at medium). Pre-flight: `eyJ...` anon key + Supabase Auth, else use a captured-session script.
+- **⚠️ SAFETY — a keyless cross-tenant run that reads `fixed` proves NOTHING (credential ceiling).** The `idor`/cross-tenant mint is **`requiresPro`**, and it also fails on a non-Supabase-Auth app or an `sb_publishable_` key. When the second identity **can't be minted**, the request goes out **keyless** → the app 401s → the run reads **`fixed`** with **`credentialProvenance: "none"`** (or a body like `"No API key found"`). **That is NOT a pass — it's a credential ceiling (an unmet precondition), so cross-tenant isolation was never actually tested.** **Rule:** before trusting any cross-tenant/authed `fixed`, CHECK `credentialProvenance` (and the body). If it's `none` / keyless, treat the result as **inconclusive / untested** — never "isolation verified". **Never report cross-tenant isolation as PASS when the second identity wasn't actually provisioned.** Cross-reference `reference/methodology.md` Step 7 (#6, the credential ceiling).
+- **Fit to THIS app:** from `inventory.supabase.tables[]` + the code, pick a real tenant table and its **owner column** (`user_id` / `org_id` / `tenant_id`) — that column is `crossTenant.ownerJsonPath`. For an app-route IDOR, find a `/api/<resource>/:id` route and seed a real **foreign** id via a `precondition` extractor (`reference/methodology.md` Steps 2–4 — an unguessable UUID with no id-leak surface caps at medium). Pre-flight: `eyJ...` anon key + Supabase Auth, else use a captured-session script — and apply the credential-ceiling rule above to whatever verdict comes back.
 
 ### B2 — Cross-tenant WRITE / DELETE
 - **SHOULD:** A can't mutate or delete B's object.
@@ -118,7 +120,9 @@ public feed answering anonymously is intended-public and is NOT a finding).
 - **Kind:** CHAIN (captured-session script as the low-priv identity).
 - **LaunchGuard expression:** captured-session script chain (`reference/chains-reference.md` §9); the engine `broken_access` is a `byo_template`.
 - **Severity:** high
-- **Fit to THIS app:** enumerate the admin/internal routes from the code (`/admin/*`, `/api/internal/*`, any handler that checks `role === "admin"` or an org-role). Upload a low-priv session and request the admin route as that real identity. Marker = the admin-only field the route returns.
+- **⚠️ Marker must be an admin DATA field, NOT a bare 200 (SPA-shell false positive).** A Next.js / SPA admin *page* route returns a **data-less HTML/JSON shell with status 200 to ANYONE** — that scaffolding is intended-public (the client then fetches data behind its own gate). Flagging that bare 200 as "forced browsing works" is a false positive. The violation marker must be a **real admin-owned field in the body** (a user-management list, an org-settings value, an internal id), not the route merely answering 200.
+- **⚠️ Credential ceiling (authed variant):** this runs as a captured-session low-priv identity; if that session can't be provisioned the request goes out keyless, 401s, and reads a false `fixed`. Apply B1's credential-ceiling rule — check `credentialProvenance`; a `none`/keyless `fixed` is **untested**, not "access denied as intended".
+- **Fit to THIS app:** enumerate the admin/internal routes from the code (`/admin/*`, `/api/internal/*`, any handler that checks `role === "admin"` or an org-role). Upload a low-priv session and request the admin route as that real identity. Marker = the admin-only **data field** the route returns (never the bare 200).
 
 ### B4 — Directory traversal / LFI
 - **SHOULD:** a path/param can't escape to unauthorized files.
@@ -134,6 +138,7 @@ public feed answering anonymously is intended-public and is NOT a finding).
 - **Kind:** CHAIN (captured-session script as the member identity).
 - **LaunchGuard expression:** captured-session script chain.
 - **Severity:** critical
+- **⚠️ Credential ceiling (authed variant):** this only means something run as a real captured **member** session. If that member identity can't be provisioned the request goes out keyless, 401s, and reads a false `fixed`. Apply B1's credential-ceiling rule — check `credentialProvenance`; a `none`/keyless `fixed` is **untested**, never "privilege escalation blocked".
 - **Fit to THIS app:** find the privileged action in the code (a role-change endpoint, billing mutation, a user-management RPC, a "promote to admin" route). Run it as a captured **member** session. Marker = the success field of the privileged action firing.
 
 ### B6 — Anonymous READ of tenant data
@@ -227,10 +232,11 @@ public feed answering anonymously is intended-public and is NOT a finding).
 ### G1 — Unauth can't trigger paid / outbound work
 - **SHOULD:** an anonymous caller can't trigger paid AI / email / SMS / compute work.
 - **Transform → violation:** POST the paid route anonymously; a paid-work marker (completion id, queued job id, message id) returns → RED.
-- **Kind:** CHAIN (`cost` `byo_template`).
-- **LaunchGuard expression:** anon POST to the route; positive marker proves the work actually ran.
+- **Kind:** CHAIN (`cost` `byo_template`) on a sandbox you own — **else CODE-REVIEW (the default on a production app).**
+- **⚠️ SAFETY — proving G1 by sending the request ACTUALLY FIRES the real paid/outbound work.** The whole point of the marker (the completion / job / message id) is that it proves the paid call *ran* — i.e. the proving request really sends the email / broadcast / SMS, really burns the AI credits, really queues the compute. **On a PRODUCTION app with real users, DO NOT fire it.** A single proving POST to a route like `/api/broadcast` or `/api/send` can blast your real user list or spend real money. **Default disposition on prod = DOWNGRADE G1 to CODE-REVIEW:** inspect that the route requires auth **and** rate-limits **before** the paid call is reached, and report from the code — do not author a fired chain. Only **send** the proving request against a **sandbox / throwaway you own**, with a **benign payload** (your own address, a no-op message). The metamorphic idea still holds; it just gets witnessed on a sandbox, never on live users.
+- **LaunchGuard expression:** *sandbox only* — anon POST to the route, positive marker proves the work actually ran. *On prod* — no chain; code-review that auth + rate-limit gate the paid call.
 - **Severity:** high
-- **Fit to THIS app:** from `inventory.endpoints` / the code, find the AI/email/SMS/compute route (`/api/chat`, `/api/generate`, `/api/send`). POST it anonymously. Marker = the completion / job / message id that proves the paid call ran. **Intended-public filter:** if the founder *intends* a free anonymous tier (the free scan IS the product), that is NOT a finding — distinguish "an attacker abuses expensive work" from "the founder offers this for free".
+- **Fit to THIS app:** from `inventory.endpoints` / the code, find the AI/email/SMS/compute route (`/api/chat`, `/api/generate`, `/api/send`, `/api/broadcast`). Decide the disposition FIRST per the safety caveat: prod app → code-review the gate; sandbox you own → POST it anonymously with a benign payload, marker = the completion / job / message id that proves the paid call ran. **Intended-public filter:** if the founder *intends* a free anonymous tier (the free scan IS the product), that is NOT a finding — distinguish "an attacker abuses expensive work" from "the founder offers this for free".
 
 ### G2 — Free tier / quota can't be exceeded
 - **SHOULD:** a non-paying request can't exceed the free tier or quota.

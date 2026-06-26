@@ -64,6 +64,14 @@ This is the core of the audit. For each:
    code (if a local checkout exists) and the `/context` `inventory` (discovered routes, tables, owner
    columns, secrets). Decide the concrete target: which route/table/identity, and what marker proves the
    leak. This is the step a scanner cannot do.
+   - **When inventory is empty (URL-only target).** This fit step assumes `/context` inventory OR a local
+     checkout. On a **URL-only** target both can come back empty — e.g. `/context` reports
+     `endpoints.count: 1`, `anonReachable: []` while the app really has `/api/admin/verify` and more. Don't
+     conclude "nothing to fit"; do the realistic recon instead: **fetch the deployed site and its JS
+     bundles and grep them** for (a) the Supabase URL / project ref (`*.supabase.co`), (b) the public anon
+     key (`eyJ…` or `sb_publishable_…`), (c) table names (`/rest/v1/<table>`), and (d) app route paths
+     (`/api/…`). That recovered surface is what you fit the chains to. This is the realistic path whenever
+     neither source nor `/context` inventory is available.
 2. **Run the discipline.** Apply `reference/methodology.md` before you commit to a chain: is it reachable
    from a fresh anonymous state, is the id enumerable, what's the honest severity, is it intended-public?
    Drop or downgrade candidates that fail a gate — a disciplined "not exploitable, here's why" is expert
@@ -77,6 +85,19 @@ This is the core of the audit. For each:
    — a witnessed GREEN, the win. `inconclusive` = the matcher didn't describe the response; fix it and
    re-run, don't report it either way. A mutation chain's `409 needsConfirmation` is healthy parked
    coverage, not a failure.
+   - **⚠️ SAFETY — a cross-tenant / authed `fixed` can be a credential ceiling, NOT a pass.** The
+     second-identity mint (`crossTenant` / `spec.env.anonKey` / captured-session) is `requiresPro` and also
+     fails on non-Supabase-Auth or `sb_publishable_` keys. When it can't be minted, the request goes out
+     **keyless** → the app 401s → the run reads **`fixed`** with **`credentialProvenance: "none"`** (or a
+     body like `"No API key found"`). **That is NOT "isolation verified" — it's an unmet precondition, so
+     the boundary was never tested.** Before reporting ANY cross-tenant/authed `fixed` as clean, CHECK
+     `credentialProvenance` (and the body): if it's `none` / keyless, mark the invariant **inconclusive /
+     untested** (a code-review-only item), never PASS. See `reference/methodology.md` Step 7 (#6),
+     `reference/invariants.md` B1, and `CHAINS.md` Step 3b.
+   - **Host-redirect footgun on the app's own routes.** A monitored `targetHost` can redirect (apex→`www`,
+     `http`→`https`). `allowedTargets.primary` must byte-match the FINAL host, so a chain aimed at the apex
+     can 307→`www` and read a false `inconclusive`. Target the canonical / resolved host (e.g. `www.…`).
+     See `reference/invariants.md` A2.
 5. **Default to Proof.** Author these `watched: false` while auditing so you don't flood the user's
    deploy-replay suite. Promote the handful worth watching forever to Guards (`watched: true`) at the end.
 
