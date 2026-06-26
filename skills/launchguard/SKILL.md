@@ -26,7 +26,6 @@ After both, you get a clear checklist of what's verified vs what still needs att
 > **Before you call anything a "finding" — from the scan OR a custom test — read `methodology.md` in this skill directory.** It is the pentester judgment layer: an ordered procedure (threat-model → reachability-from-fresh-state → enumerability → escalation → honest severity → intended-public filter → validation gate) that turns raw "the endpoint answered 200" into a defensible finding, and filters out the false positives a non-expert would otherwise ship. Load it for any "check my app" / "is this secure" / "find my vulnerabilities" request.
 
 > **Authoring a FUNCTIONAL test instead (prove a critical flow still WORKS, not that it's exploitable)? Read `functional-methodology.md` in this skill directory.** It is the functional twin of `methodology.md`: how to pick deploy-gate regression chains, the mandatory two-gate authoring pattern (prove you reached the state, then assert the outcome), anti-flake rules, and the `intent:"functional"` verdict mapping (PASS = working/green, FAIL = broken/red, ERROR = inconclusive). Load it whenever the user wants to "watch that signup/checkout/dashboard still works on every deploy" rather than find a vulnerability.
-
 ---
 
 ## What the external scan verifies
@@ -116,7 +115,7 @@ Full report: https://www.launchguard.dev/scan/abc-123
 
 Use ✓ for verified-safe, ✗ for issues found. This gives the user a clear picture of coverage.
 
-**Severity** (use the scan's own field when present): **Critical** = service-role key exposed, tables writable unauth, unprotected AI endpoints. **High** = tables readable with data, public storage with files, unprotected email/SMS. **Medium** = empty public tables, callable RPCs, empty public storage. **Low** = informational / best-practice.
+**Severity:** use the scan's own field as emitted (the `done` event carries `criticalCount` / `highCount` / `mediumCount`); present each finding at whatever tier the scan reports rather than hand-mapping a finding type to a tier yourself. Lead with the most urgent class, a service-role key exposed, tables writable unauth, or an unprotected AI endpoint. Note that LaunchGuard's product surface for **custom tests** (Bring Your Own Test, below) is binary, **Exploitable / Safe**, with no graded tier, so once you move from the scan into authoring a custom test you no longer declare a severity level.
 
 **If 0 findings:** show the checklist all ✓. Clarify this verifies the external surface — internal logic bugs and authenticated-user exploits are NOT tested — but it does prove the data layer and API perimeter are solid.
 
@@ -129,6 +128,8 @@ After presenting scan results, review the codebase against the code verification
 For each ✗ found in either checklist, offer to fix it. Before writing any fix, READ the relevant project files to understand auth model, middleware stack, and schema. Never generate fix code based solely on scan output.
 
 After fixes are applied, offer to re-run the external scan to verify the fix worked from the outside. This closes the loop: code fix → external proof.
+
+For a **custom test** (Bring Your Own Test, below) the same loop is built into the chain API: a chain that comes back `vulnerable` carries a ready-made `fixPrompt` you apply, after which you re-run the chain and confirm it flips to `fixed`. See "Step 5: close the loop with the fix prompt" under Bring Your Own Test for how to read and apply it.
 
 ### Step 7: Ongoing Guard (when appropriate)
 
@@ -368,7 +369,8 @@ A custom test is one HTTP request plus a matcher block that says "exploited look
 | every substring must appear in the body | `assertion.bodyContainsAll` | literal substrings |
 | every JSONPath must resolve to a value | `assertion.jsonPathsPresent` | non-null marker |
 | pull a value out for a later step | `steps[].extract[]` | only needed for multi-step chains |
-| severity | top-level `severity` | `critical` \| `high` \| `medium` \| `low` |
+| the human story shown to the founder | top-level `interpretation` | `{ headline?, whyItMatters?, whoCanDoIt?, attackerNextStep?, fixHint? }`, all optional free-form prose, rendered VERBATIM. See "The `interpretation` block" below |
+| severity (optional) | top-level `severity` | **optional**; omit it and the engine defaults to `critical`. The product shows a binary **Exploitable / Safe** status, not a graded tier, so you no longer pick a level |
 | watch it on every deploy (Guard) vs one-shot (Proof) | top-level `watched` | boolean, **defaults `false` (Proof)**. See "Proof vs Guard" above |
 
 That is the whole matcher vocabulary. Do NOT invent `bodyContainsAny`, `statusEquals`, `regex`, etc.
@@ -409,6 +411,22 @@ Response: `{ "count": N, "chains": [ { "chainId": "...", "title": "...", "lastRe
 
 Only author a new chain when nothing covers the rule. If a chain already covers the same exploit key, re-run it (`POST /chains/<id>/run`) instead of duplicating; or, for a genuinely different assertion, inspect the blueprint and author a distinct variant. To remove a true duplicate or broken test, archive it with `DELETE /api/v1/chains/<chainId>` (reversible via `POST /chains/<id>/restore`) — see the **Cleanup / triage pass** section below for the full archive decision rules, and `chains-reference.md` §7 for the archive/restore contract.
 
+### The `interpretation` block: your words, shown to the founder verbatim
+
+Every custom test now carries a top-level `interpretation` object. This is the human story a non-technical founder reads on the result card, and it is the ONLY place that meaning comes from: **the engine never writes, summarizes, or infers it from your assertion.** It renders exactly what you put here, word for word, so write it honestly, impact-first, and in plain language a solo founder understands. If you leave it empty, the founder sees a bare HTTP request and a green or red status with no idea whether it matters, which is the exact failure this block fixes.
+
+All five fields are optional free-form prose, but `headline` and `fixHint` carry the most weight, so write those two for every chain:
+
+- **`headline`** (≤200 chars): one plain-language sentence naming who can do what, the line the founder scans first. Use "Anyone with no account can run up your AI bill", not "POST /api/chat returns 200".
+- **`whyItMatters`** (≤1000): why this is bad for the business in concrete terms, what data leaks, what it costs, what a customer loses.
+- **`whoCanDoIt`** (≤300): the attacker's starting position, framed by the real evidence (see provenance below), for example no login at all, any signed-up user, or an under-privileged member.
+- **`attackerNextStep`** (≤500): what an attacker does with this once they find it, such as enumerate, scrape, loop to run up cost, or pivot.
+- **`fixHint`** (≤2000): your own plain fix guidance. This is also the **free fallback** the fix-prompt loop hands back when the owner is not on Pro (see Step 5), so make it actionable on its own.
+
+Caps are per field as listed above, with an 8KB total, and unknown keys are rejected, so use only these five names.
+
+**Frame `whoCanDoIt` from the real provenance.** The evidence now distinguishes a credential the attacker **FORGED** (a value they put in the request themselves, e.g. a guessed cookie or the app's public anon key) from a session that was legitimately **CAPTURED** (a real provisioned login). Match your wording to whichever one proved the exploit: "anyone with no login, using a value they can forge" reads very differently from "any logged-in user, using their own real session", and getting that distinction right is what makes the founder trust the finding.
+
 ### Step 3: write the proving curl first, then translate it
 
 Always start from the plain request that proves the exploit, the thing you would paste into a terminal as an anonymous attacker. **Run it for real** and look at the response body — you need to see the actual success field it returns. Then translate it mechanically into the JSON. Minimal, valid, read-only template (the 90% case, e.g. an unauthenticated paid endpoint):
@@ -417,9 +435,15 @@ Always start from the plain request that proves the exploit, the thing you would
 {
   "title": "Anonymous request triggers paid AI work without auth",
   "targetHost": "sandbox.example.com",
-  "severity": "high",
   "source": "ai_agent",
   "watched": false,
+  "interpretation": {
+    "headline": "Anyone with no account can run up your AI bill",
+    "whyItMatters": "Your /api/chat endpoint answers without checking who is calling, so a stranger can send unlimited requests straight to your paid AI provider. Every call costs you money, and nothing stops a bot from looping it thousands of times overnight.",
+    "whoCanDoIt": "Anyone on the public internet, with no login and no account. No stolen credentials are needed; the request below carries no auth at all.",
+    "attackerNextStep": "Script the same request in a loop to burn your provider credits, exhaust your quota, or push your bill into the thousands before you notice.",
+    "fixHint": "Require an authenticated session on POST /api/chat and add a per-user rate limit before the call reaches the AI provider. Reject anonymous callers with 401."
+  },
   "spec": {
     "version": 2,
     "steps": [
@@ -450,6 +474,8 @@ Notes on the template:
 - `"version": 2` is a required field — just set it to 2.
 - `"source": "ai_agent"` — use that value.
 - **`"watched": false` makes this a Proof** (one-shot, the default — see "Proof vs Guard" above). Leave it `false` for an exploit you're just proving now; set it `true` only when the user wants this re-run on every deploy (a Guard).
+- **`interpretation` is the human story the founder actually reads** (rendered verbatim). Write all five fields honestly; `headline` and `fixHint` carry the most weight. See "The `interpretation` block" above.
+- **`severity` is omitted on purpose.** It is now optional (the engine defaults to `critical`) and the product shows a binary **Exploitable / Safe** status, so there is no tier to declare.
 - **`"jsonPathsPresent": ["$.id"]` is a PLACEHOLDER.** You MUST replace `$.id` with the actual success field you saw when you ran the proving curl in this step. Real endpoints often return a different field (e.g. `/api/checkout` returns `checkoutUrl`, not `id`). Copying `$.id` blindly makes a genuinely vulnerable endpoint come back `inconclusive` because the marker never matches.
 
 Pick a positive marker that proves the **paid work actually ran**: a completion id, a queued job id, a provider response field — whatever field you actually observed. That marker is your `jsonPathsPresent` (a field that must exist) or `bodyContainsAll` (literal substrings).
@@ -470,9 +496,15 @@ You need the target's **public** Supabase anon key + project ref — client-side
 {
   "title": "Authenticated user can read other tenants' rows in `businesses`",
   "targetHost": "sandbox.example.com",
-  "severity": "critical",
   "source": "ai_agent",
   "watched": false,
+  "interpretation": {
+    "headline": "A logged-in user can read every other customer's records",
+    "whyItMatters": "The businesses table hands back rows that belong to other accounts when any signed-in user asks for them. Row-level security is not isolating tenants, so one customer can read another customer's private data.",
+    "whoCanDoIt": "Any user who can sign up for an ordinary account, using their own legitimate login. No admin rights or special access are needed; the engine proved it with a fresh throwaway signup it created itself.",
+    "attackerNextStep": "Page through the table to scrape every tenant's records, then leak or sell the data, or pivot off the ids and emails it exposes for targeted attacks.",
+    "fixHint": "Enable row-level security on the businesses table and add a policy that limits each row to its owner (for example user_id = auth.uid()). Re-test that a second account sees zero foreign rows."
+  },
   "spec": {
     "version": 2,
     "steps": [
@@ -522,7 +554,7 @@ These are the high-stakes ones — the **judgment and safety** rules. The exhaus
 - **A GET that triggers downstream WRITES is a deploy hazard.** Side-effect is method-derived, so a `GET` that proxies to a write / a spend is still classified `read_only` + auto-replay and will fire that write on EVERY deploy. There is no GET→manual downgrade. Do NOT author it (or archive it if you did); cover the endpoint a safer way.
 - **Cross-host targeting is the key to backend/Supabase tests.** Only `allowedTargets.primary` must byte-equal `targetHost`; `.api` and `.supabase` are free-form passthrough hosts that may differ from the monitored domain. Use `target: "api"` to hit a separate backend directly — unauth BOLA / object-access holes usually live there, even when the frontend proxy is gated.
 - **The matcher cannot express rate-limit, response-time, or response-header assertions.** No "fire N, expect 429", no `maxResponseMs`, no header matcher. A pure missing-rate-limit (OWASP API4) or missing-security-header bug is NOT authorable as a chain — report those as code-review findings, not chains.
-- **Severity is yours, set it honestly, and don't cry wolf.** A `vulnerable` verdict only means "an outsider reached this and the marker matched" — it does NOT mean the data is sensitive. Aggregate public counters (`/api/stats`), a published pricing list, or a public blog feed answer unauthenticated BY DESIGN and are NOT findings (the `methodology.md` Step 6 intended-public filter). Reserve `vulnerable` for data that crosses a real trust boundary (another tenant's rows, PII, internal ids/emails, secrets, paid work). When genuinely ambiguous, label it "needs product triage" instead of asserting a scary severity. A clean sweep where every table returns `fixed` is the suite WORKING, not broken assertions.
+- **A `vulnerable` verdict is not automatically a finding, so don't cry wolf.** `severity` is now optional (the engine defaults it to `critical`) and the product shows a binary **Exploitable / Safe** status, so there is no tier for you to grade, just an honest call on whether this is real. A `vulnerable` verdict only means "an outsider reached this and the marker matched", it does NOT mean the data is sensitive. Aggregate public counters (`/api/stats`), a published pricing list, or a public blog feed answer unauthenticated BY DESIGN and are NOT findings (the `methodology.md` Step 6 intended-public filter). Reserve `vulnerable` for data that crosses a real trust boundary (another tenant's rows, PII, internal ids/emails, secrets, paid work). When genuinely ambiguous, label it "needs product triage" rather than forcing a verdict. A clean sweep where every table returns `fixed` is the suite WORKING, not broken assertions.
 
 ### Step 4: submit and run
 
@@ -533,7 +565,7 @@ curl -X POST https://api.launchguard.dev/api/v1/chains \
   -H "Authorization: Bearer $LAUNCHGUARD_API_KEY" -H "Content-Type: application/json" \
   -d @chain.json
 
-# run once -> { "result": "vulnerable|fixed|inconclusive", "reason": "...", "matched": ... }
+# run once -> { "result": "vulnerable|fixed|inconclusive", "reason": "...", "matched": ..., "interpretation": {...}, "fixPrompt": {...}|null }
 curl -X POST https://api.launchguard.dev/api/v1/chains/<chainId>/run \
   -H "Authorization: Bearer $LAUNCHGUARD_API_KEY" -H "Content-Type: application/json"
 ```
@@ -549,6 +581,20 @@ Report the verdict plainly:
 
 **Pointing the user at the dashboard:** do NOT hand-build a `https://launchguard.dev/app/<id>` link from a chain row, because chain rows carry no `appId`, so you cannot construct that `<id>` yourself. Instead, get the real `dashboardUrl` from the API and pass that: both `POST /api/v1/connect` and `GET /api/v1/context` return a ready `dashboardUrl` for the app. So call `/context` (it is `lg_`-key-callable) or read the connect response, and point the user at the `dashboardUrl` it hands you. Always use the API-provided URL; never build the link from a chain row.
 
+### Step 5: close the loop with the fix prompt
+
+A `vulnerable` verdict is not the end. `GET /api/v1/chains/<id>` and the `POST /chains/<id>/run` response now both return two extra fields you should act on:
+
+- **`interpretation`**: the author's own block, echoed back verbatim (always present, free).
+- **`fixPrompt`**: how to fix it, gated by the chain OWNER's plan:
+  - **Pro owner, confirmed `vulnerable`:** `{ "available": true, "prompt": "<assembled, stack-tailored fix prompt>" }`. Apply `fixPrompt.prompt` directly; it is assembled from the masked evidence, the interpretation, and the detected stack.
+  - **Free owner, confirmed `vulnerable`:** `{ "available": false, "locked": "pro", "fixHint": "<the author's own fixHint, or null>" }`. There is no assembled prompt on Free, so fall back to `fixPrompt.fixHint` (the `interpretation.fixHint` YOU wrote) and tell the user that the full stack-tailored fix prompt is a Pro feature.
+  - **No confirmed-vulnerable run yet:** `fixPrompt` is `null`. Run the chain and confirm it `vulnerable` before expecting a fix prompt.
+
+Note that an AI agent authoring through an `lg_` key is usually on the owner's Free plan, so expect the `locked: "pro"` shape and lean on the author's own `fixHint` you supplied in `interpretation`.
+
+Then **close the loop**: apply the fix to the project, and re-run `POST /api/v1/chains/<id>/run` to confirm the verdict flips from `vulnerable` to `fixed`. That re-run is the external proof the fix actually landed, the chain equivalent of the scan loop in Step 6 (code fix, then external proof). If it still reads `vulnerable`, the fix did not hold; iterate.
+
 ### Managing the test suite via the API
 
 Your `lg_` key gives you the FULL custom-test lifecycle on a domain's suite without a human. Full request/response contracts (status codes, error shapes, the `archived`/`restore`/`disposition` details) are in `chains-reference.md` §7 + §10; the **archive decision rules** are the **Cleanup / triage pass** section above. The operations:
@@ -560,10 +606,10 @@ Your `lg_` key gives you the FULL custom-test lifecycle on a domain's suite with
 | Toggle a default check | `POST /api/v1/coverage { targetHost, stackId, enabled }` | toggle `firebase` / `write_delete` only; non-toggleable stacks `409`; `write_delete` fires real mutations; takes effect next scan unless `rescanNow` |
 | Create | `POST /api/v1/chains` | defaults to a Proof; `"watched": true` ingests a Guard |
 | List / discover apps | `GET /api/v1/chains[?targetHost=<host>]` | omit `targetHost` to list every app's chains; add `?includeArchived=true` to include archived rows |
-| Inspect one | `GET /api/v1/chains/<id>` | full `spec` — diff this to confirm a dedupe, especially for script chains |
+| Inspect one | `GET /api/v1/chains/<id>` | full `spec` — diff this to confirm a dedupe, especially for script chains; also returns `interpretation` + `fixPrompt` (Step 5) |
 | Promote / demote | `PATCH /api/v1/chains/<id> { "watched": true\|false }` | curate the watched suite without re-ingesting |
 | Modify in place | `PATCH /api/v1/chains/<id> { title?, severity?, spec?, watched? }` | changing `spec` re-validates + re-derives side-effect (a non-GET method flips it to mutation) |
-| Run | `POST /api/v1/chains/<id>/run` | read-only runs freely; a mutation needs `{ "confirmMutation": true }` — see "Running mutation tests" |
+| Run | `POST /api/v1/chains/<id>/run` | read-only runs freely; a mutation needs `{ "confirmMutation": true }` — see "Running mutation tests". The response carries `interpretation` + `fixPrompt` (Step 5) |
 | Archive / restore | `DELETE /api/v1/chains/<id>` / `POST /api/v1/chains/<id>/restore` | reversible; restore can `409 titleCollision`. Apply the Cleanup checklist first |
 
 **Dedupe** by the `exploit` `{method,path,target}` key — but for script/Playwright chains use the carve-out in Step 2 (dedupe by title / `spec.script.source`, never the constant exploit summary). These calls work whether or not you authored the chain, as long as it's your account's.
