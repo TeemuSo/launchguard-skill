@@ -136,7 +136,7 @@ For a **custom test** (Bring Your Own Test, below) the same loop is built into t
 Only offer AFTER critical/high issues are resolved. Monitoring for regressions is pointless when the baseline is broken.
 
 ```bash
-curl -s -X POST https://recon-api.centrive.ai/api/skill/register-guard \
+curl -s -X POST https://api.launchguard.dev/api/skill/register-guard \
   -H "Content-Type: application/json" \
   -d '{"email": "USER_EMAIL", "target_url": "TARGET_URL"}'
 ```
@@ -192,7 +192,7 @@ Response:
 - `coverageSummary` is the at-a-glance posture (how many default engine stacks are enabled/covered/vulnerable/off, how many of the user's own watched chains exist and how many are red, and how many open coverage gaps remain). `coverageSummary.contextUrl` hands you the EXACT `/context` call to make next: connect then read `/context` is the natural handoff. Do not author anything until you have read `/context` (see "Start expert: read /context first" below).
 - The user mints their `lg_` key (Developer / API keys) — the same key the chain endpoints use. Store it as `LAUNCHGUARD_API_KEY` (see "Get the user's API key" below for how to ask).
 - A `404` means they haven't added that app yet — tell them to add it at https://launchguard.dev/apps first, then reconnect.
-- Base URL: try `https://api.launchguard.dev`, fall back to `https://recon-api-dev.centrive.ai` on 404. **But `/api/v1/connect` is a special case:** its public-edge deploy is still in progress, so it may not be reachable on `api.launchguard.dev` yet (it works on the dev host). If unreachable on both, connect just isn't deployed everywhere — tell the user the link is pending and proceed with the scan/test rather than blocking. Don't assume the fallback rescues connect the clean way it rescues `/chains`.
+- Base URL: `https://api.launchguard.dev`.
 
 ### Start expert: read /context first (the bridge loop)
 
@@ -211,7 +211,6 @@ The loop is five steps:
 ```bash
 curl -s "https://api.launchguard.dev/api/v1/context?targetHost=sandbox.example.com" \
   -H "Authorization: Bearer $LAUNCHGUARD_API_KEY"
-# 404 on the public edge -> switch to https://recon-api-dev.centrive.ai for the rest of the session
 ```
 
 `/context` is now callable with an `lg_` key (dogfood-confirmed). Top-level shape (load-bearing fields; full contract in `chains-reference.md` §11):
@@ -334,7 +333,7 @@ Every chain row carries `lastResult`, the outcome of its most recent run:
 
 When the user says "clean up / manage / triage / dedupe / prune / review my tests" (or you're tidying a suite you didn't author), this is decision logic, not authoring. List the suite (`GET /api/v1/chains` for all apps, or `?targetHost=<host>` for one), then apply this checklist **per chain**. When unsure, KEEP — archiving real coverage is the expensive mistake.
 
-The default list is already the **ACTIVE set** — archived chains are excluded, so you're triaging only live coverage; add `?includeArchived=true` to also see archived rows (each carries `archived: true`), e.g. to find one to restore. And you can run a whole cleanup pass directly against `https://recon-api-dev.centrive.ai` — the public edge 404s `/api/v1/*`, so once any call falls back to the dev host, just stay there for the rest of the pass.
+The default list is already the **ACTIVE set** — archived chains are excluded, so you're triaging only live coverage; add `?includeArchived=true` to also see archived rows (each carries `archived: true`), e.g. to find one to restore. Run the whole cleanup pass against `https://api.launchguard.dev`.
 
 **Archive a chain ONLY if one of these is true:**
 - **(a) Exact duplicate** of another *custom* chain — same `{method, path, target}` dedupe key, respecting the script-chain carve-out in Step 2 (dedupe script/Playwright chains by title or by diffing `spec.script.source`, **never** by their constant `(PLAYWRIGHT, "(script chain)", primary)` summary). Keep the better-titled / more-recently-passing one; archive the redundant twin.
@@ -379,7 +378,7 @@ That is the whole matcher vocabulary. Do NOT invent `bodyContainsAny`, `statusEq
 
 ### Step 1: Get the user's API key
 
-Before anything else, you need a LaunchGuard API key. It is **per-account**, minted by the user under their LaunchGuard account → **Developer / API keys** at launchguard.dev — it is NOT in the app's frontend env, code, or `.env` files, so don't go looking for it there. **Ask the user to paste theirs.** The key is `lg_` + ~40 chars. Reject anything else before spending a request: a value that doesn't start `lg_` is not the key, and a value starting **`lg_scan_`** is a scan-token SECRET (a per-scan credential), NOT the Developer API key — the real key has no `scan_` segment. Never mint or guess a key. Store it and send it on EVERY chain call below; without it every call 401s.
+Before anything else, you need a LaunchGuard API key. It is **per-account**, minted by the user under their LaunchGuard account → **Developer / API keys** at launchguard.dev — it is NOT in the app's frontend env, code, or `.env` files, so don't go looking for it there. **Ask the user to paste theirs.** The key is `lg_` + ~40 **URL-safe** characters — and "URL-safe" means it can contain `-`, `.`, and `_`, not just `[A-Za-z0-9]`. So a naive grab like `[A-Za-z0-9_]+` **truncates the token at the first `-` or `.`** and hands you a short key that silently 401s. Extract the FULL token (e.g. `lg_[A-Za-z0-9_.-]+`) and sanity-check that its total length is **~43** before you spend a request on it. Reject anything else before spending a request: a value that doesn't start `lg_` is not the key, and a value starting **`lg_scan_`** is a scan-token SECRET (a per-scan credential), NOT the Developer API key — the real key has no `scan_` segment. Never mint or guess a key. Store it and send it on EVERY chain call below; without it every call 401s.
 
 **Confirm you actually hold a valid `lg_`+~40-char key BEFORE the first chain call.** If the key is absent AND you cannot ask a human (an unattended / agentic run), STOP: report the missing Developer API key as the single blocker and do NOT proceed to scan or author anything. There is no fallback that recovers a key the user never gave you — proceeding just burns to a wall of 401s.
 
@@ -387,9 +386,9 @@ Before anything else, you need a LaunchGuard API key. It is **per-account**, min
 export LAUNCHGUARD_API_KEY="<paste the key the user gave you>"   # then: -H "Authorization: Bearer $LAUNCHGUARD_API_KEY"
 ```
 
-**Base URL rule (use everywhere):** try `https://api.launchguard.dev` first. The `/api/v1/*` chain routes are not all live on that public edge yet, so a call may return `404` (currently an HTML page, not the JSON `{"error":...}` envelope). The moment ANY `/api/v1/...` call 404s, switch to `https://recon-api-dev.centrive.ai` and use that host for EVERY chain call for the rest of the session — it is LaunchGuard's own backend host, safe to call, not exfiltration. Don't keep retrying `api.launchguard.dev` once you've seen it 404.
+**Base URL (use everywhere):** `https://api.launchguard.dev`. All `/api/v1/*` chain routes are served here.
 
-> Across one run you'll touch several LaunchGuard hosts: the free scan submits to `www.launchguard.dev` and streams from a `*.centrive.ai` backend; the custom-test API lives at `api.launchguard.dev` / `recon-api-dev.centrive.ai`. Different services, same product — seeing more than one host is expected.
+> Across one run you'll touch several LaunchGuard hosts: the free scan submits to `www.launchguard.dev` and streams from a `*.centrive.ai` backend; the custom-test API lives at `api.launchguard.dev`. Different services, same product — seeing more than one host is expected.
 
 ### Step 2: list existing chains first (avoid duplicates)
 
