@@ -40,6 +40,45 @@ Logging in is ONE browser click — no keys to copy or paste.
 
 ---
 
+## Step 0 (funnel): Pairing-code onboarding (hands-free, no human approval)
+
+**Use this INSTEAD of the interactive device login above when the pasted prompt carries a pairing code.** The LaunchGuard website hands a copyable prompt to a visitor who *already signed in through the browser*; that browser session pre-approved a device pairing server-side. So Claude Code does NOT run the human-approval round trip — it just claims the key the website already authorized.
+
+**Trigger.** The prompt you were handed has a `Pairing code:` line (the `device_code`) and a `Target:` line, like this:
+
+```
+Use the LaunchGuard skill to connect this project and prove one security boundary.
+Pairing code: <DEVICE_CODE>
+Target: <TARGET_URL>
+Exchange the pairing code for your key, then connect, read /context, and author + run one tailored test.
+```
+
+When a `Pairing code:` value is present, take THIS path — do NOT run the interactive device login above.
+
+1. **Exchange the pairing code for a key in ONE call** — no link to open, no human approval, because the browser already authenticated the user and pre-approved this pairing:
+   ```bash
+   curl -s -X POST https://www.launchguard.dev/api/device/token \
+     -H "Content-Type: application/json" -d '{"device_code":"<PAIRING_CODE>"}'
+   ```
+   - `{"access_token":"lg_…"}` (HTTP 200) → success, IMMEDIATELY. This is the expected case.
+   - `{"status":"authorization_pending"}` (HTTP 202) → the pairing was NOT pre-approved. Fall back to the normal interactive device login (Step 0 above) starting at its step 2.
+   - HTTP 410 `expired` / HTTP 409 `already_consumed` → the code is stale or already used. Tell the user to regenerate the prompt from the LaunchGuard website, then retry with the fresh pairing code.
+
+2. **Persist the `lg_` token exactly like Step 0 step 5** — store it and export it for every `/api/v1` call:
+   ```bash
+   mkdir -p ~/.launchguard && printf '{"token":"%s"}' "<access_token>" > ~/.launchguard/credentials && chmod 600 ~/.launchguard/credentials
+   export LAUNCHGUARD_API_KEY="<access_token>"
+   ```
+
+3. **Then fall straight into the existing flow below — do not re-derive or duplicate it.** With the key set, continue exactly as the normal connect path:
+   - **Connect:** `POST /api/v1/connect` using the `Target:` URL from the prompt (see "Connect to LaunchGuard" below).
+   - **Read `/context`:** run the bridge loop (see "Start expert: read /context first").
+   - **Author + run ONE tailored test:** do exactly the "Then: author ONE tailored, business-logic test" section below — pick one `author_gap` / `author_from_template` from `/context`'s `recommendations[]`, submit it as a watched Guard, run it, and **report the verdict**.
+
+**Why this skips the approval round trip:** the browser already did the auth and created a pre-approved pairing, so Claude Code just claims the key the website authorized — the interactive device-approval step is intentionally skipped, not forgotten.
+
+---
+
 ## Connect to LaunchGuard (lightweight handshake)
 
 Use this when the user wants to *link* their project to LaunchGuard for an app they already added — triggers like "connect this to LaunchGuard", "connect my Claude Code", "watch this app on every deploy", or when they paste the connect prompt from their LaunchGuard app page.
