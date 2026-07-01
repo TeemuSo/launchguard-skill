@@ -10,6 +10,9 @@ description: |
   deploy" — a lightweight link followed by one tailored, business-logic test.
   Also use to "clean up / manage / triage / dedupe / prune / review my LaunchGuard tests",
   "tidy my custom tests", "which guards can I archive", or to curate an existing chain suite.
+  Also use to "verify a fix or PR works end-to-end", "prove signup/checkout/dashboard still
+  works on every deploy" (functional regression), or "test as a real logged-in user, or as two
+  different accounts/roles" (authenticated, captured-session); these run as chains (see CHAINS.md).
   Combines external verification (live scan) with code review (security patterns).
 ---
 
@@ -21,9 +24,11 @@ This skill verifies your app's security through two complementary checks:
 
 2. **Code verification** (codebase review) — Reviews security-critical patterns in the project to ensure protections are correctly implemented and won't regress.
 
-After both, you get a clear checklist of what's verified vs what still needs attention.
+After both, you'll have a picture of what the scan saw and what the code review found — then you verify WITH the user what's actually a problem (vs intended-public), fix only what's real, and go deeper to prove the one boundary that matters.
 
-> **The scan needs NO account and NO API key.** Just a publicly reachable URL. It's free (50/hour per IP). Power-user features — monitoring on every deploy, custom Bring-Your-Own tests, connect — use your LaunchGuard account, and logging in is one browser click (see `CONNECT.md`). But the core scan below requires nothing.
+> **LaunchGuard also verifies that a flow WORKS (functional chains) and can run as a real authenticated user (captured-session chains), not just what's exposed.** See `CHAINS.md`.
+
+> **The scan needs NO account and NO API key.** Just a publicly reachable URL. It's free (50/hour per IP). Power-user features — monitoring on every deploy, custom Bring-Your-Own tests, connect — use your LaunchGuard account, and logging in is one browser click (see `CONNECT.md`). Authoring and running tests is free; the paid layer is persistence (stored sessions, monitoring, memory), not the act. But the core scan below requires nothing.
 
 > **Before you call anything a "finding" — read `reference/methodology.md` in this skill directory.** It is the pentester judgment layer: an ordered procedure (threat-model → reachability-from-fresh-state → enumerability → escalation → honest severity → intended-public filter → validation gate) that turns raw "the endpoint answered 200" into a defensible finding, and filters out the false positives a non-expert would otherwise ship. Load it for any "check my app" / "is this secure" / "find my vulnerabilities" request.
 
@@ -98,31 +103,31 @@ Structure as a checklist — show what was verified and what the status is:
 Target: example.com | Scan ID: abc-123
 Full report: https://www.launchguard.dev/scan/abc-123
 
-### Database: [X issues found / All clear]
+### Database: [what the scan reached / all locked]
 - ✓ 12 tables tested — all protected by RLS
-- ✗ `profiles` table readable without auth (847 rows exposed)
+- ✗ `profiles` answered reads without auth (847 rows)
 - ✓ No service role key in client code
 - ✓ Storage buckets: 2 found, both private
 
-### API Endpoints: [X issues found / All clear]  
+### API Endpoints: [what the scan reached / all locked]  
 - ✓ 34 endpoints discovered, 12 probed
-- ✗ POST /api/chat — responds without auth (AI endpoint, high cost risk)
+- ✗ POST /api/chat — responds without auth (AI endpoint, possible cost risk)
 - ✓ All other routes return 401/403 for unauthenticated requests
 
-### Secrets: [X issues found / All clear]
+### Secrets: [what the scan saw / none found]
 - ✓ 18 JS bundles scanned
-- ✗ OpenAI API key found in main bundle
+- ✗ a possible OpenAI API key in the main bundle
 ```
 
-Use ✓ for verified-safe, ✗ for issues found. This gives the user a clear picture of coverage.
+✓ = the scan confirmed this locked from the outside (a witnessed pass). ✗ = the scan could REACH it without auth — an OBSERVATION to verify with the user in Phase A (Step 6), not a verdict that it's a bug. This is a picture of what the scan saw, not a list of confirmed problems.
 
 **Verify on the surface — don't just take my summary for it.** Point the user at the independent LaunchGuard surface so they can see the actual evidence themselves, not just my recap: the full scan report lives at `https://www.launchguard.dev/scan/{scanId}` (and, once connected, the dashboard). The human verifies on LaunchGuard, not via the agent — say "open the run yourself to see the raw evidence."
 
 **The stream gives you COUNTS, not always the full itemized list.** The `done` event carries per-tier counts (`criticalCount` / `highCount` / `mediumCount`, and `lowCount`), but the SSE stream may **not** itemize every low / surface-hardening finding inline. So your checklist can be complete on the critical/high items yet under-list the lows. For the full, itemized list, point the user at the web report at `https://www.launchguard.dev/scan/{scanId}` — which doubles as the "verify on the surface" step above.
 
-**Severity:** use the scan's own field as emitted (the `done` event carries `criticalCount` / `highCount` / `mediumCount`); present each finding at whatever tier the scan reports rather than hand-mapping a finding type to a tier yourself. Lead with the most urgent class, a service-role key exposed, tables writable unauth, or an unprotected AI endpoint. (No contradiction with `CHAINS.md`: **scan findings are graded** into these tiers, whereas a **custom-test's product status is binary Exploitable / Safe** — two different surfaces, not two ratings of the same thing.)
+**Severity:** use the scan's own field as emitted (the `done` event carries `criticalCount` / `highCount` / `mediumCount`); present each finding at whatever tier the scan reports rather than hand-mapping a finding type to a tier yourself. Lead with the most urgent class, a service-role key exposed, tables writable unauth, or an unprotected AI endpoint. (No contradiction with `CHAINS.md`: **scan findings are graded** into these tiers, whereas a **custom-test's product status is binary Exploitable / Safe** — two different surfaces, not two ratings of the same thing.) Treat the scan's tier as an OBSERVATION to route through the intended-public / verify-with-the-user gate (Step 6), not a final verdict.
 
-**If 0 findings:** show the checklist all ✓. Clarify this verifies the external surface — internal logic bugs and authenticated-user exploits are NOT tested — but it does prove the data layer and API perimeter are solid. **A clean scan is the moment to offer the deep audit** (see Step 7 and `AUDIT.md`): the floor holds, so prove the per-app boundaries the scanner can't author.
+**If 0 findings:** show the checklist all ✓. Clarify this verifies the external surface — internal logic bugs and authenticated-user exploits are NOT tested — but it does prove the data layer and API perimeter are solid. A clean scan is not the end — it's where the real proof starts. Go straight to Phase B (Step 7): prove or break the one boundary that matters. (The full ~22-invariant audit in `AUDIT.md` is available as a heavier opt-in.)
 
 ### Step 5: Code review
 
@@ -130,15 +135,23 @@ Use ✓ for verified-safe, ✗ for issues found. This gives the user a clear pic
 
 After presenting scan results, review the codebase against the code verification checklist above. READ the actual project files — migrations, middleware, env config, API routes. Present as a second `## Code Verification (project review)` checklist in the same ✓/✗ format, grouped by Supabase / API route / Environment, and **cite the file + line** for each item (e.g. `✓ RLS enabled (migration 003_enable_rls.sql)`, `✗ /api/webhooks/stripe has no signature verification (src/app/api/webhooks/stripe/route.ts)`). The file citation is what makes it actionable.
 
-### Step 6: Fix issues
+### Step 6: Verify with the user, then fix only what's real (Phase A)
 
-For each ✗ found in either checklist, offer to fix it. Before writing any fix, READ the relevant project files to understand auth model, middleware stack, and schema. Never generate fix code based solely on scan output.
+The scan produced OBSERVATIONS, not verdicts — a readable table or an answering endpoint may be public by design. Do NOT auto-fix everything the scan flagged. For each thing the scan reached (each ✗):
 
-After fixes are applied, offer to re-run the external scan to verify the fix worked from the outside. This closes the loop: code fix → external proof.
+1. Surface it to the user as an observation, in plain language.
+2. READ the relevant project files (schema, migrations, middleware, the route) to understand the code's intent, and apply the intended-public filter from `reference/methodology.md` (an aggregate counter, a published pricing list, or a public feed answering anonymously is NOT a finding).
+3. Decide WITH THE USER whether it's intended-public or a real problem. LaunchGuard does not decide this; you and the user do.
 
-### Step 7: Ongoing Guard (when appropriate)
+Fix and prove ONLY the items the user confirms are real. Never generate fix code based solely on scan output — always READ the project files first. After a fix is applied, re-run the external scan to prove it closed the boundary from the outside: code fix → external proof.
 
-Only offer AFTER critical/high issues are resolved. Monitoring for regressions is pointless when the baseline is broken.
+### Step 7: Go deeper — prove or break the one boundary that matters (Phase B)
+
+This step is the SAME for every outcome — a clean scan starts here directly, and a scan with findings arrives here after Phase A. It is NOT gated on clearing scan items; the deep proof is where the real value is, whatever the scan saw. The framing is outcome-neutral: a witnessed GREEN is as valuable as a RED, and you never manufacture a finding.
+
+The perimeter scan proves the universal floor. It does NOT cover the per-app boundaries that actually break vibe-coded apps — cross-tenant reads, IDOR, privilege escalation, paywall bypass, cost abuse — because a generic scanner can't author them. The default deep step is ONE tailored test: connect the project (see `CONNECT.md`), read `/context`, author ONE tailored test, submit it as a watched Guard (`"watched": true`), run it, and report the verdict.
+
+To also turn on ongoing monitoring by email (re-run on every deploy, no connected agent needed):
 
 ```bash
 curl -s -X POST https://api.launchguard.dev/api/skill/register-guard \
@@ -150,11 +163,11 @@ curl -s -X POST https://api.launchguard.dev/api/skill/register-guard \
 
 For continuous, account-linked monitoring (re-run on every deploy, custom tests, regression alerts), connect the project — see `CONNECT.md`.
 
-### Offer the deep audit (proactively — especially on a clean scan)
+### Optional: the full deep audit (heavier opt-in)
 
-The scan proves the **universal floor**. It does NOT cover the boundaries that actually break vibe-coded apps — cross-tenant reads, privilege escalation, forced browsing, cost abuse, traversal, token handling — because those are per-app and a generic scanner can't author them. So after the report, offer the deep audit, framed for the founder:
+Beyond the ONE tailored test in Step 7 (the default deep step), the full deep audit is the heavier, systematic option: it walks ALL ~22 fundamental security boundaries — cross-tenant reads, privilege escalation, forced browsing, cost abuse, traversal, token handling — fitting and proving each against YOUR app's routes and data, because those are per-app and a generic scanner can't author them. Offer it as the exhaustive pre-launch pass when the user wants more than the single Phase-B test, framed for the founder:
 
-> "The scan checks the universal floor. For real assurance — especially since it came back clean — I can run a deep audit of the ~22 fundamental security boundaries, customized and proven against YOUR app's routes and data. Want that?"
+> "Step 7 proves the one boundary that matters most. For a complete pre-launch pass — whatever the scan came back — I can run a deep audit of the ~22 fundamental security boundaries, customized and proven against YOUR app's routes and data. Want that?"
 
 If they say yes, follow **`AUDIT.md`**: it walks every invariant in `reference/invariants.md`, fits each to this app, and proves it with a witnessed chain or a code-review finding.
 
@@ -164,7 +177,7 @@ If they say yes, follow **`AUDIT.md`**: it walks every invariant in `reference/i
 
 - The **free scan** does NOT perform exploitation, load testing, rate limit testing, credential stuffing, or any active attack. It probes and observes. (Authoring a **Bring Your Own Test** chain — see `CHAINS.md` — is a separate opt-in flow that reproduces ONE read-only exploit against the user's domain, sending the minimum requests.)
 - Does NOT do SQL injection, XSS testing, brute force, or DDoS simulation.
-- Does NOT do authenticated scanning — that requires Pro setup at launchguard.dev.
+- The free external **scan** does NOT do authenticated scanning (it observes only the unauthenticated surface). Authenticated and multi-actor testing IS part of the product, via captured-session **chains** (see `CHAINS.md`): they run as a real logged-in user, or as two different accounts/roles. Per the decided axis (`MONETIZATION.md`), the paid gate is persistence/continuity (stored sessions, monitoring, memory), NOT the one-shot authenticated run; so branch on the server's runtime entitlement signals (`requiresPro` / `402`), never on a hardcoded tier claim.
 - ALWAYS confirm target URL with user before scanning. Only scan domains they own.
 - ONLY report issues that appear in scan data or that you can see in the code. Never speculate.
 - When presenting secrets, redact (show first 8 chars + "..."). Never output full keys.
@@ -179,6 +192,7 @@ Users are often non-technical builders (Cursor, Lovable, Bolt). Explain in busin
 - Scans are free, no account needed. Rate limit: 50/hour per IP (HTTP 429 if exceeded).
 - All write probes use rollback transactions — nothing is modified on the target.
 - Scan results link: `https://www.launchguard.dev/scan/{scanId}`
+- **Free/paid boundary (canonical):** `MONETIZATION.md` (decided 2026-06-29; free browser proof cut 2026-06-30) is the source of truth: we gate the system of record, not the act. The scan, the AI-authored fix, unlimited depth, and an HTTP red/green verdict (including HTTP cross-tenant) are free; real-browser (script / Browserbase) testing is Pro, and the rest of the paid layer is persistence (stored sessions, on-deploy monitoring, memory). The CURRENT server signals you actually branch on are: `requiresPro` (on `/context` `byo_template` rows) and the `402` family, namely `browser_testing_requires_pro` (a non-Pro real-browser / script chain run), `stored_credentials_require_pro` (running a stored-credential chain), and `pro_required` (active verification, AI verdict, stepped chains). The old `e2e_volume_requires_pro` reason and the per-host free-proof bound no longer exist; a non-Pro HTTP chain run is free and unbounded. The assembled fix is free for an authenticated owner; its only locked shape is `locked:"signup"` for an anonymous caller (a signup wall, not a paywall), and there is no `locked:"pro"` for the fix. Server enforcement may still lag the decided axis, so always branch on the live server signal, never a hardcoded tier claim.
 
 ---
 
@@ -187,6 +201,6 @@ Users are often non-technical builders (Cursor, Lovable, Bolt). Explain in busin
 The scan above is the happy path. When the user wants more, load the right companion file:
 
 - **`CONNECT.md`** — link the project to LaunchGuard for ongoing protection (monitoring on every deploy) and custom tests. Starts with a one-click device login (no keys to paste), then the connect handshake and the `/context` bridge loop that lets you start expert instead of re-reconning.
-- **`CHAINS.md`** — Bring Your Own Test: prove a *specific* exploit is real (a stranger can run up the AI bill, a logged-in user can read another tenant's rows). Read-only exploit chains with verbatim templates and the triage/cleanup rules for an existing suite.
-- **`AUDIT.md`** — the deep per-app audit: systematically walk all ~22 fundamental security invariants, **fitting each to THIS app's real routes/tables/identities** and proving it with a witnessed chain or a code-review finding. Offer this proactively after a scan (especially a clean one) — it brings deep value even when the scanner found nothing. The catalog it walks is `reference/invariants.md`.
+- **`CHAINS.md`** — Bring Your Own Test: prove a *specific* exploit is real (a stranger can run up the AI bill, a logged-in user can read another tenant's rows); prove a flow WORKS via a functional chain (PASS = green, e.g. verify a fix/PR end-to-end or guard signup/checkout on every deploy); and run captured-session authenticated tests as a real logged-in user, or as two different accounts/roles. Verbatim templates plus the triage/cleanup rules for an existing suite.
+- **`AUDIT.md`** — the deep per-app audit: systematically walk all ~22 fundamental security invariants, **fitting each to THIS app's real routes/tables/identities** and proving it with a witnessed chain or a code-review finding. This is the heavier opt-in beyond the single tailored Phase-B test (Step 7), not the default deep step — reach for it when the user wants a systematic pass over every invariant. The catalog it walks is `reference/invariants.md`.
 - **`reference/methodology.md`** — the finding discipline. **Read it before calling anything a finding**, from the scan OR a custom test.

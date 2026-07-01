@@ -44,16 +44,23 @@ Logging in is ONE browser click — no keys to copy or paste.
 
 **Use this INSTEAD of the interactive device login above when the pasted prompt carries a pairing code.** The LaunchGuard website hands a copyable prompt to a visitor who *already signed in through the browser*; that browser session pre-approved a device pairing server-side. So Claude Code does NOT run the human-approval round trip — it just claims the key the website already authorized.
 
-**Trigger.** The prompt you were handed has a `Pairing code:` line (the `device_code`) and a `Target:` line, like this:
+**Trigger.** The prompt you were handed has a `Pairing code:` line (the `device_code`), and the target URL inline in the FIRST sentence (`...review a security boundary on <TARGET_URL>.`) — NOT on a separate `Target:` line. Like this:
 
 ```
-Use the LaunchGuard skill to connect this project and prove one security boundary.
+Use the LaunchGuard skill to review a security boundary on <TARGET_URL>.
+
+Connect, then read /context. Our scan saw the following from the outside — these are observations, not verdicts:
+- table `businesses` answered reads without auth (26 rows)
+
+First, decide intent with me: for each, read the code and tell me whether it's public by design or a real leak. Fix and prove only what we agree is a real problem.
+
+Then go deeper: prove or break the one boundary that matters — cross-tenant read, IDOR, paywall, or cost-sink. Author one tailored test, submit it to LaunchGuard as a watched Guard, and run it for the verdict.
+
 Pairing code: <DEVICE_CODE>
-Target: <TARGET_URL>
-Exchange the pairing code for your key, then connect, read /context, and author + run one tailored test.
+Exchange the pairing code for your key before connecting.
 ```
 
-When a `Pairing code:` value is present, take THIS path — do NOT run the interactive device login above.
+The trigger key is the `Pairing code:` line — its value is the `device_code` you exchange. Extract the target URL from the FIRST sentence ("...review a security boundary on <TARGET_URL>."); there is no `Target:` line anymore. When a `Pairing code:` value is present, take THIS path — do NOT run the interactive device login above.
 
 1. **Exchange the pairing code for a key in ONE call** — no link to open, no human approval, because the browser already authenticated the user and pre-approved this pairing:
    ```bash
@@ -70,10 +77,11 @@ When a `Pairing code:` value is present, take THIS path — do NOT run the inter
    export LAUNCHGUARD_API_KEY="<access_token>"
    ```
 
-3. **Then fall straight into the existing flow below — do not re-derive or duplicate it.** With the key set, continue exactly as the normal connect path:
-   - **Connect:** `POST /api/v1/connect` using the `Target:` URL from the prompt (see "Connect to LaunchGuard" below).
+3. **Then fall into the existing flow below — do not re-derive or duplicate it.** With the key set, continue exactly as the normal connect path, then run the two-phase flow. The scan produces OBSERVATIONS, not verdicts — never treat the scanner's `exposed` / `amber` / `secured` state as a decision:
+   - **Connect:** `POST /api/v1/connect` using the target URL from the FIRST sentence of the prompt (`...review a security boundary on <TARGET_URL>.`) — there is no `Target:` line (see "Connect to LaunchGuard" below).
    - **Read `/context`:** run the bridge loop (see "Start expert: read /context first").
-   - **Author + run ONE tailored test:** do exactly the "Then: author ONE tailored, business-logic test" section below — pick one `author_gap` / `author_from_template` from `/context`'s `recommendations[]`, submit it as a watched Guard, run it, and **report the verdict**.
+   - **Phase A — orient & verify (only when the scan saw something):** surface what `/context` SAW — its `findings` / `inventory` — to the user in plain language AS OBSERVATIONS. For each, read the code's intent and decide WITH THE USER whether it is intended-public or a real problem, applying the intended-public filter (an aggregate counter, a published pricing list, or a public feed answering anonymously is NOT a finding). Fix and prove ONLY the items the user confirms are real problems. LaunchGuard does not pre-decide this; you and the user do. **Skip Phase A entirely when the scan saw nothing** — a clean / GREEN app has no observations to triage, so go straight to Phase B.
+   - **Phase B — go deeper (identical for every outcome; this is exactly where a GREEN / clean app STARTS):** prove or break the ONE boundary that matters — cross-tenant read, IDOR, paywall, or cost-sink — the business-logic boundary a perimeter scan cannot see. Framing is OUTCOME-NEUTRAL: a witnessed GREEN counts as much as a RED; NEVER set out to "find a vulnerability" and never manufacture a finding. Author ONE tailored test from `/context`'s `recommendations[]` / `coverageGaps[]`, submit it as a watched Guard (`"watched": true`), run it, let LaunchGuard's verdict engine adjudicate, and **report the verdict**. This is exactly the "Then: author ONE tailored, business-logic test" section below. RED, AMBER, and GREEN all converge onto this SAME Phase B.
 
 **Why this skips the approval round trip:** the browser already did the auth and created a pre-approved pairing, so Claude Code just claims the key the website authorized — the interactive device-approval step is intentionally skipped, not forgotten.
 
@@ -112,13 +120,14 @@ Response:
 
 This is THE one new habit, and it is the FIRST thing you do after connecting and BEFORE you author anything. The old flow re-reconned the app and authored one chain per rule from scratch. You no longer do that. The engine already scanned this app: its coverage, inventory, and the gaps it cannot cover are all handed to you in one call. You START expert. You do NOT re-derive what the default scanner already knows; you READ it.
 
-The loop is five steps:
+The loop is six steps:
 
 1. **CONNECT**: `POST /api/v1/connect` (above). Returns `coverageSummary` and a `contextUrl`.
 2. **READ CONTEXT**: `GET /api/v1/context?targetHost=<host>`. ONE call returns everything you need: the engine's inventory, every test's verdict (engine checks AND the user's own chains), the gaps, and an explicit list of recommended actions. Read this before authoring a single chain.
-3. **ACT ON `recommendations[]`**: for each recommendation, do EXACTLY what its `action` field says (the four actions are below). The anti-duplication discipline now arrives as DATA: a `recommendations[].action === "skip"` tells you precisely what the engine already covers, so you author nothing for it. Trust `/context`; do not re-derive the engine.
-4. **RUN**: `POST /api/v1/chains/:id/run` on any chain you authored, for its tri-state verdict (unchanged).
-5. **WATCH**: ingest the chains you want guarded with `"watched": true` so they re-run on every deploy (unchanged).
+3. **VERIFY (Phase A)**: surface `/context`'s `findings` / `inventory` to the user as OBSERVATIONS, not verdicts — the scan SAW things, it did not DECIDE them. Read the code's intent and decide WITH THE USER what (if anything) is a real problem before you author or fix anything, applying the intended-public filter. Skip this step when the scan saw nothing (a clean / GREEN app has nothing to triage — go straight to step 4). See the fuller Phase A / Phase B doctrine in the "Step 0 (funnel)" section above.
+4. **ACT ON `recommendations[]`**: only AFTER that verification, and never treating scan state as a decision, do EXACTLY what each recommendation's `action` field says (the four actions are below). The anti-duplication discipline now arrives as DATA: a `recommendations[].action === "skip"` tells you precisely what the engine already covers, so you author nothing for it. Trust `/context`; do not re-derive the engine.
+5. **RUN**: `POST /api/v1/chains/:id/run` on any chain you authored, for its tri-state verdict (unchanged).
+6. **WATCH**: ingest the chains you want guarded with `"watched": true` so they re-run on every deploy (unchanged).
 
 #### `GET /api/v1/context?targetHost=<host>`
 
@@ -189,7 +198,11 @@ Toggles a toggleable engine stack on or off (merge-write). Live success shape:
 
 ### Then: author ONE tailored, business-logic test (from /context's recommendations)
 
-Connecting alone is enough to show "Connected". But the moment that makes LaunchGuard worth keeping is a custom test specific to THIS app, the thing a generic scanner cannot write because it never read the code. You no longer derive that rule blind: `/context` already told you the gaps. After reading `/context`:
+Connecting alone is enough to show "Connected". But the moment that makes LaunchGuard worth keeping is a custom test specific to THIS app, the thing a generic scanner cannot write because it never read the code. You no longer derive that rule blind: `/context` already told you the gaps.
+
+**First, Phase A — present the observations, confirm intent.** The scan produces OBSERVATIONS, not verdicts: never treat its `exposed` / `amber` / `secured` state as a decision. When `/context` SAW something (`findings` / `inventory`), surface each item to the user in plain language AS AN OBSERVATION, read the code's intent, and decide WITH THE USER whether it is intended-public or a real problem — applying the `reference/methodology.md` Step 6 intended-public filter (an aggregate counter, a published pricing list, or a public feed answering anonymously is NOT a finding). Fix and prove ONLY what the user confirms is a real problem; LaunchGuard does not pre-decide this. When the scan saw nothing, there is nothing to triage — skip straight to Phase B below.
+
+**Then, Phase B — prove or break the ONE boundary that matters.** This is exactly where a clean / GREEN app STARTS, and where RED / AMBER apps converge onto the same path. The framing is OUTCOME-NEUTRAL: a witnessed GREEN is as valuable as a RED; you are NOT trying to "find a vulnerability" and you never manufacture a finding. You let LaunchGuard's verdict engine adjudicate the run. After reading `/context`:
 
 1. **Pick your ONE test from `recommendations[]` / `coverageGaps[]`** (the engine handed you the candidates). Choose an `author_gap` or `author_from_template` item: a rule the engine genuinely cannot cover, prioritized by impact and by what the `why` flags. These are the same business-logic boundaries that matter most:
    - a plan / quota / usage limit (a non-paying request cannot exceed the free tier), usually a `cost_abuse` / `cost` recommendation,
@@ -197,7 +210,7 @@ Connecting alone is enough to show "Connected". But the moment that makes Launch
    - a paywall (a Pro-only route or resource served to an unpaid request), usually a `payment_bypass` / `payment` recommendation,
    - an admin-only or internal route reachable by a guest, usually a `broken_access` recommendation.
    Do NOT pick something `/context` marked `action: "skip"`: the engine already covers it.
-2. **Translate that recommendation into a read-only custom test** (use the templates in `CHAINS.md`, or the `byo_template` for an `author_from_template` item) and submit it **as a Guard**, set `"watched": true` in the ingest body. This flow is explicitly about establishing ongoing protection, so it is the one place you watch by default. Choose a positive marker that proves the rule is actually broken: a foreign row's owner id, a completion/job id, a paid resource field.
+2. **Translate that recommendation into a read-only custom test** (use the templates in `CHAINS.md`, or the `byo_template` for an `author_from_template` item) and submit it **as a Guard**, set `"watched": true` in the ingest body. This flow is explicitly about establishing ongoing protection, so it is the one place you watch by default. Define the marker that WOULD prove a break if one exists — a foreign row's owner id, a completion/job id, a paid resource field — so the verdict is decided by evidence, not assumption.
 3. Report the verdict. Because you submitted it `watched: true`, the chain is now a Guard: re-run on every deploy with regression alerts.
 
 Because the app is now **monitored**, a chain against it (read-only OR mutating) is allowed straight away: adding the app to the account is the ownership signal (trust-the-owner). Keep this first test read-only, minimal (one ingest + one run), and tailored, a test that feels made for their app, not a generic check.

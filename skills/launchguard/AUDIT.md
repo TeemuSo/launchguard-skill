@@ -30,10 +30,11 @@ or a code-review finding. This goes WAY deeper than the free scan.
 ## When to run
 
 Trigger this on: "deep audit", "thorough security review", "audit everything", "go deeper than the
-scan", "full security audit before launch", or any request for real pre-launch assurance. Also **offer
-it proactively after a scan — especially a clean one** (`SKILL.md` Step 7 / Next steps): a 0-finding
-scan means the floor holds, which is the right moment to prove the per-app boundaries the floor doesn't
-cover.
+scan", "full security audit before launch", or any request for real pre-launch assurance. It's the heavier,
+systematic option beyond the single tailored Phase-B test (`SKILL.md` Step 7): the default deep step is
+that one tailored test — reach for the full audit when the user wants EVERY invariant walked. A clean
+scan is a fine moment to go deeper (the floor holds, so prove the per-app boundaries it doesn't cover),
+but treat this as the opt-in for the full sweep, not the automatic next move.
 
 ## Prerequisites
 
@@ -64,7 +65,7 @@ exposure → E Injection → F Surface → G Cost/abuse). For **each** invariant
 Confirm it via `/context` and move on — do NOT author anything.
 - Find the owning stack's row in `tests[]` (`supabase`, `secrets`, `surface`) or the `recommendations[]`
   entry. `verdict: "fixed"` → engine-covered and clean. `verdict: "vulnerable"` → the scan already found
-  it; fold it into the report, don't re-prove it.
+  it; fold it into the report, don't re-prove it — as an observation still subject to the intended-public filter, not a final verdict.
 - Record each as **engine-covered** in the report.
 
 > **B7 (anon write/delete) is no longer an engine-toggle item.** Don't toggle the engine `write_delete`
@@ -107,17 +108,22 @@ This is the core of the audit. For each:
      and let their explicit `{"confirmMutation": true}` run it. That captured, unfired test is the value;
      report it as **authored — awaiting your run**, not skipped. (Fire it yourself only against a sandbox
      you own, with a benign payload.)
-   - **⚠️ Credential ceiling — the engine now returns `inconclusive` (not a false `fixed`) when the
-     second identity can't be provisioned.** The second-identity mint (`crossTenant` / `spec.env.anonKey` /
-     captured-session) is `requiresPro` and also fails on non-Supabase-Auth or `sb_publishable_` keys. When
-     it can't be minted, the cross-tenant/authed boundary was never exercised — and the backend now reports
-     that honestly as **`inconclusive`** (`credentialProvenance: "none"`, or a body like `"No API key
-     found"`), **no longer a misleading `fixed`**, so you won't be fooled into reporting a pass. **Don't
+   - **⚠️ Credential ceiling: the engine returns `inconclusive` (not a false `fixed`) when the
+     second identity can't be provisioned.** The second-identity mint (`crossTenant` / `spec.env.anonKey`)
+     is **FREE**, not a Pro gate: the engine provisions a fresh test identity via inline anon-signup with
+     no server-side Pro check. It can still fail on non-Supabase-Auth or `sb_publishable_` keys, or a signup
+     error. When it can't be minted, the cross-tenant/authed boundary was never exercised, and the backend
+     reports that honestly as **`inconclusive`** (`credentialProvenance: "none"`, or a body like `"No API
+     key found"`), **never a misleading `fixed`**, so you won't be fooled into reporting a pass. **Don't
      drop the invariant — AUTHOR the test anyway and SURFACE it as "authored — awaiting your run"**, so the
-     user can run it with the credential it needs (a captured session) or on Pro. (Still sanity-check
-     `credentialProvenance` on any cross-tenant `fixed` — a real provisioned identity is what makes a
-     `fixed` trustworthy.) See `reference/methodology.md` Step 7 (#6), `reference/invariants.md` B1, and
-     `CHAINS.md` Step 3b.
+     user can run it with the credential it needs (on a non-Supabase-Auth app, a captured-session script).
+     (Still sanity-check `credentialProvenance` on any cross-tenant `fixed` — a real provisioned identity is
+     what makes a `fixed` trustworthy.) See `reference/methodology.md` Step 7 (#6), `reference/invariants.md`
+     B1, and `CHAINS.md` Step 3b. **The Pro line is browser/custody, not the mint:** running a chain that
+     carries a STORED credential → `402 stored_credentials_require_pro`, and any non-Pro real-browser
+     (script) chain run → `402 browser_testing_requires_pro` (real-browser testing is Pro; there is no
+     free browser proof). Branch on whichever live server signal you get
+     (`requiresPro` / `402` / `locked` / `inconclusive`), never a hardcoded tier.
    - **Host-redirect footgun on the app's own routes.** A monitored `targetHost` can redirect (apex→`www`,
      `http`→`https`). `allowedTargets.primary` must byte-match the FINAL host, so a chain aimed at the apex
      can 307→`www` and read a false `inconclusive`. Target the canonical / resolved host (e.g. `www.…`).

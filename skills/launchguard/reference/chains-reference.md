@@ -440,6 +440,8 @@ Without `targetHost`, the catalog only. With `targetHost`, each stack ALSO carri
 
 Each row also carries `categories[]` (the specific checks the stack runs) and `scanFlags`.
 
+> **`requiresPro: true` on the `byo_template` stacks (`cost` / `idor` / `broken_access`) is CURRENT server enforcement, not the decided axis.** Per `MONETIZATION.md` (2026-06-29) we gate the system of record, not the act, so authoring depth (writing and running a chain, including authenticated/cross-tenant) is FREE and these template gates are slated to open. Until enforcement catches up, branch on the live `requiresPro` / `402` signal the server actually returns, never a hardcoded tier.
+
 ### POST /api/v1/coverage: toggle a default check
 
 Body `{ targetHost, stackId, enabled }`. Merge-write. Live success shape:
