@@ -184,8 +184,9 @@ finding or ingest it as a `vulnerable` chain, it must pass ALL of these:
    and reads `fixed` — which MASKS the bug. Do not present that `fixed` as "safe". Mark it "cannot
    auto-prove black-box — code-review finding only" (see `chains-reference.md` §8, the credential
    ceiling). A false "you're safe" is worse than no test.
+7. **Code is not the live app.** "I read the owner-check in the source" is a hypothesis, not a finding — the deployed target may differ from your checkout. The run's verdict against the live target, not the code, is what you report.
 
-If a candidate fails any check, fix it or drop it. Only a candidate that passes all six becomes a
+If a candidate fails any check, fix it or drop it. Only a candidate that passes all seven becomes a
 reported finding or a `vulnerable` chain.
 
 ---
@@ -223,6 +224,7 @@ FALSE-POSITIVE FILTER (last gate)
 VALIDATION GATE (before reporting/ingesting)
   [ ] Re-ran fresh, reproduces  [ ] Every claim traces to raw output  [ ] Blind re-verify holds
   [ ] Not relabeling a `fixed` pass  [ ] Severity consistent  [ ] No false-`fixed`-as-safe
+  [ ] Verdict is the live run's, not the code's
 ```
 
 ---

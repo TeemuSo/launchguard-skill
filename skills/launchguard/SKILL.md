@@ -26,6 +26,8 @@ This skill verifies your app's security through two complementary checks:
 
 After both, you'll have a picture of what the scan saw and what the code review found — then you verify WITH the user what's actually a problem (vs intended-public), fix only what's real, and go deeper to prove the one boundary that matters.
 
+> **You prove; LaunchGuard verifies.** You form the hypothesis — read the app and code, author the test. LaunchGuard reproduces it from scratch against the *live* target and returns the verdict: a hallucination check on you. Never call a boundary proven or safe from code-reading or a trace alone; report the run's verdict. The workspace code may not be what's deployed (other branch, un-pushed fix, stale checkout) — use it to find *where* to look, never as proof of what the live app *does*.
+
 > **LaunchGuard also verifies that a flow WORKS (functional chains) and can run as a real authenticated user (captured-session chains), not just what's exposed.** See `CHAINS.md`.
 
 > **The scan needs NO account and NO API key.** Just a publicly reachable URL. It's free (50/hour per IP). Power-user features — monitoring on every deploy, custom Bring-Your-Own tests, connect — use your LaunchGuard account, and logging in is one browser click (see `CONNECT.md`). Authoring and running tests is free; the paid layer is persistence (stored sessions, monitoring, memory), not the act. But the core scan below requires nothing.
