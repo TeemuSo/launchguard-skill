@@ -1,0 +1,128 @@
+name: Traffic digest
+
+# Posts a daily "skill traffic digest" for this public repo to a Slack
+# incoming webhook so the maintainer sees clones/views/stars at a glance.
+#
+# Required repo secrets (Settings > Secrets and variables > Actions):
+#   TRAFFIC_PAT              PAT with Administration:read (fine-grained) or
+#                            repo scope (classic) on TeemuSo/launchguard-skill.
+#                            The default GITHUB_TOKEN cannot read /traffic.
+#   SLACK_PULSE_WEBHOOK_URL  Slack incoming webhook URL.
+#
+# GitHub traffic data is a rolling 14-day window only; older days are gone.
+
+on:
+  schedule:
+    - cron: "0 7 * * *" # daily at 07:00 UTC
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  digest:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Build and post traffic digest
+        env:
+          REPO: TeemuSo/launchguard-skill
+          TRAFFIC_PAT: ${{ secrets.TRAFFIC_PAT }}
+          SLACK_PULSE_WEBHOOK_URL: ${{ secrets.SLACK_PULSE_WEBHOOK_URL }}
+          # "true" only on manual runs; used to force-post even with zero traffic.
+          IS_MANUAL: ${{ github.event_name == 'workflow_dispatch' }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "${TRAFFIC_PAT:-}" ]; then
+            echo "::error::TRAFFIC_PAT secret is missing. Add a PAT with Administration:read (fine-grained) or repo scope (classic)."
+            exit 1
+          fi
+
+          API="https://api.github.com"
+          AUTH="Authorization: Bearer ${TRAFFIC_PAT}"
+          ACCEPT="Accept: application/vnd.github+json"
+          VERSION="X-GitHub-Api-Version: 2022-11-28"
+
+          # Fetch a GitHub REST endpoint, capturing body and HTTP status.
+          # Fails loudly on 401/403 so a bad/expired PAT is noticed.
+          fetch() {
+            local path="$1"
+            local out
+            out="$(curl -sS -w '\n%{http_code}' \
+              -H "$AUTH" -H "$ACCEPT" -H "$VERSION" \
+              "${API}/repos/${REPO}${path}")"
+            local code="${out##*$'\n'}"
+            local body="${out%$'\n'*}"
+            if [ "$code" = "401" ] || [ "$code" = "403" ]; then
+              echo "::error::GitHub API returned HTTP ${code} for ${path}. TRAFFIC_PAT is missing scope or is unauthorized (need Administration:read / repo). Body: ${body}" >&2
+              exit 1
+            fi
+            if [ "$code" -lt 200 ] || [ "$code" -ge 300 ]; then
+              echo "::error::GitHub API returned HTTP ${code} for ${path}. Body: ${body}" >&2
+              exit 1
+            fi
+            printf '%s' "$body"
+          }
+
+          CLONES_JSON="$(fetch "/traffic/clones")"
+          VIEWS_JSON="$(fetch "/traffic/views")"
+          REPO_JSON="$(fetch "")"
+
+          TODAY="$(date -u +%Y-%m-%d)"
+
+          # Pick the most recent FULL day (a dated entry strictly before today,
+          # since today's bucket is still partial). Emits "count uniques",
+          # defaulting to "0 0" when the array is empty/missing.
+          latest_full_day() {
+            local json="$1" key="$2"
+            printf '%s' "$json" | jq -r --arg today "$TODAY" --arg key "$key" '
+              (.[$key] // [])
+              | map(select((.timestamp[0:10]) < $today))
+              | if length > 0 then .[-1] else {count:0, uniques:0} end
+              | "\(.count // 0) \(.uniques // 0)"
+            '
+          }
+
+          read -r Y_CLONES Y_CLONES_U <<<"$(latest_full_day "$CLONES_JSON" clones)"
+          read -r Y_VIEWS Y_VIEWS_U <<<"$(latest_full_day "$VIEWS_JSON" views)"
+
+          # 14-day rolling totals come straight from the API's top-level fields.
+          T_CLONES="$(printf '%s' "$CLONES_JSON" | jq -r '.count // 0')"
+          T_CLONES_U="$(printf '%s' "$CLONES_JSON" | jq -r '.uniques // 0')"
+          T_VIEWS="$(printf '%s' "$VIEWS_JSON" | jq -r '.count // 0')"
+          T_VIEWS_U="$(printf '%s' "$VIEWS_JSON" | jq -r '.uniques // 0')"
+
+          STARS="$(printf '%s' "$REPO_JSON" | jq -r '.stargazers_count // 0')"
+          FORKS="$(printf '%s' "$REPO_JSON" | jq -r '.forks_count // 0')"
+
+          echo "clones yesterday=${Y_CLONES} (${Y_CLONES_U} uniq), 14d=${T_CLONES} (${T_CLONES_U} uniq)"
+          echo "views  yesterday=${Y_VIEWS} (${Y_VIEWS_U} uniq), 14d=${T_VIEWS} (${T_VIEWS_U} uniq)"
+          echo "stars=${STARS} forks=${FORKS}"
+
+          # Skip the daily post when yesterday had no activity, to avoid noise.
+          # Manual (workflow_dispatch) runs always post.
+          if [ "$IS_MANUAL" != "true" ] && [ "$Y_CLONES" = "0" ] && [ "$Y_VIEWS" = "0" ]; then
+            echo "No clones or views yesterday; skipping Slack post (scheduled run)."
+            exit 0
+          fi
+
+          if [ -z "${SLACK_PULSE_WEBHOOK_URL:-}" ]; then
+            echo "::warning::SLACK_PULSE_WEBHOOK_URL secret is missing; skipping Slack post."
+            exit 0
+          fi
+
+          TEXT=":package: launchguard-skill daily — clones: ${Y_CLONES} yesterday (${Y_CLONES_U} unique), 14d: ${T_CLONES} (${T_CLONES_U} unique) | views: ${Y_VIEWS} (${Y_VIEWS_U} unique) | :star: ${STARS} | forks: ${FORKS}"
+
+          PAYLOAD="$(jq -n --arg text "$TEXT" '{text: $text}')"
+
+          SLACK_OUT="$(curl -sS -w '\n%{http_code}' \
+            -X POST -H 'Content-type: application/json' \
+            --data "$PAYLOAD" \
+            "$SLACK_PULSE_WEBHOOK_URL")"
+          SLACK_CODE="${SLACK_OUT##*$'\n'}"
+          SLACK_BODY="${SLACK_OUT%$'\n'*}"
+          if [ "$SLACK_CODE" -lt 200 ] || [ "$SLACK_CODE" -ge 300 ]; then
+            echo "::error::Slack webhook POST failed with HTTP ${SLACK_CODE}. Body: ${SLACK_BODY}" >&2
+            exit 1
+          fi
+          echo "Posted digest to Slack (HTTP ${SLACK_CODE})."
