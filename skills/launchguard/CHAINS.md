@@ -70,7 +70,7 @@ That is the whole matcher vocabulary. Do NOT invent `bodyContainsAny`, `statusEq
 
 Every custom test now carries a top-level `interpretation` object. This is the human story a non-technical founder reads on the result card, and it is the ONLY place that meaning comes from: **the engine never writes, summarizes, or infers it from your assertion.** It renders exactly what you put here, word for word, so write it honestly, impact-first, and in plain language a solo founder understands. If you leave it empty, the founder sees a bare HTTP request and a green or red status with no idea whether it matters, which is the exact failure this block fixes.
 
-All five fields are optional free-form prose, but `headline` and `fixHint` carry the most weight, so write those two for every chain:
+All five fields are optional free-form prose, but `headline` and `whyItMatters` carry the most weight (they are the card's title and body, read first and often the only two the founder reads, see "How the founder reads the card" below), so write those two for every chain. Still write `fixHint` well: it anchors the dashboard "How to fix" block and the copy-able fix prompt:
 
 - **`headline`** (≤200 chars): one plain-language sentence naming who can do what, the line the founder scans first. Use "Anyone with no account can run up your AI bill", not "POST /api/chat returns 200".
 - **`whyItMatters`** (≤1000): why this is bad for the business in concrete terms, what data leaks, what it costs, what a customer loses.
@@ -81,6 +81,36 @@ All five fields are optional free-form prose, but `headline` and `fixHint` carry
 Caps are per field as listed above, with an 8KB total, and unknown keys are rejected, so use only these five names.
 
 **Frame `whoCanDoIt` from the real provenance.** The evidence now distinguishes a credential the attacker **FORGED** (a value they put in the request themselves, e.g. a guessed cookie or the app's public anon key) from a session that was legitimately **CAPTURED** (a real provisioned login). Match your wording to whichever one proved the exploit: "anyone with no login, using a value they can forge" reads very differently from "any logged-in user, using their own real session", and getting that distinction right is what makes the founder trust the finding.
+
+#### How the founder reads the card: write for it, top to bottom
+
+The card (the `HttpTestExecutor`, shown BOTH in the anonymous onboarding funnel AND embedded in the dashboard chain-detail page) renders top to bottom, and a non-technical founder rules on it in that order. Write for that reading order:
+
+1. **`headline`** is the big title line at the top, the very first thing read (it falls back to the chain `title`, then to a generic "Is this intended?").
+2. **`whyItMatters`** is the body paragraph directly under the headline, always visible. This is the "body" the owner loves.
+3. Then the product prints one or more **step lines** ("We send a GET request to .../items/projects without logging in, exactly like a stranger would") and the **outcome** ("→ The server responded with HTTP 403"). You do NOT write these: they are machine-generated from the request you pick (method, path, resolved host, role, anonymous vs authed) and from the real response. Your only lever here is choosing the request precisely, so its auto-generated sentence reads true.
+4. Then the hardcoded chain-level question **"Is this what you intended?"** with two buttons ("No — lock it down" / "This is public on purpose"), and under them a soft nudge line = **`attackerNextStep`**.
+
+The founder must understand **what happened and whether it matters from `headline` + `whyItMatters` alone**, before they ever look at the request, the raw JSON, or the fix. So the whole story goes into those two. Write **`attackerNextStep`** as the stakes line the founder weighs right before ruling ("here is what is at stake, you decide"), not a jargon wall.
+
+On the card, `whoCanDoIt` shows only as a fallback when `whyItMatters` is empty, and `fixHint` shows only after a regression (the "earned red" state), so they are secondary THERE. But the full dashboard chain-detail page (FindingView) renders them as labeled lines around the card ("Who can do this:" = `whoCanDoIt`, "What they do next:" = `attackerNextStep`, "How to fix" = `fixHint`), and server-side ALL FIVE fields feed the assembled "Copy fix prompt" the owner pastes into their coding agent (`fixHint` is also the fallback shown to anonymous, not-signed-in users). Every field is read somewhere, so write all five well; do NOT drop `whoCanDoIt` or `fixHint` just because they are not the card's lead.
+
+**Priority for every chain:** make **`headline` + `whyItMatters`** carry the complete story on their own; `attackerNextStep` sets the stakes; `whoCanDoIt` + `fixHint` complete the dashboard and the fix prompt.
+
+#### RED vs GREEN framing: match the words to the observed verdict
+
+The template above uses the RED framing ("Anyone with no account can run up your AI bill"), which asserts the exploit works RIGHT NOW. But most well-authored guards, and the onboarding default, are witnessed-GREEN gate guards (see the recipe below) where the current result is a 403/denied and the gate HOLDS. For those, an "Anyone can do X" headline is FALSE right now and misleads the founder. Pick the framing by the verdict you actually observed:
+
+- **RED (exploit reproduced, `vulnerable`):** state what an attacker can do right now, e.g. "Anyone with no account can run up your AI bill".
+- **GREEN (gate holds, `fixed`, the witnessed-green guard, the common onboarding case):** frame `headline` as what is GUARDED, e.g. "Guards that no-login strangers can never read other companies' data". Frame `whyItMatters` to state the invariant, WHERE it is enforced, the CURRENT safe state (correctly denied, 403), and the REGRESSION TRIGGER that would break it ("a single policy edit or a schema migration that resets permissions would instantly expose every tenant ... this guard turns red the moment that happens"). Frame `attackerNextStep` as the CONDITIONAL blast radius ("if it ever opens, an attacker could page through ... scrape ... leak or sell ... pivot off the ids").
+
+**Gold standard for a witnessed-green guard** (a real Directus multi-tenant example, this is what great looks like):
+
+- **Headline:** "Guards that no-login strangers can never read other companies' construction projects from the Directus backend."
+- **Body (`whyItMatters`):** "Sapuri is multi-tenant: each construction company's projects, addresses, phases, members and documents must stay private to that company. That isolation is enforced ONLY by Directus role/policy permissions on the sapuri.directus.app backend, a separate public host whose URL even ships to the browser for file downloads. Right now the anonymous 'public' role is correctly denied (403). But a single Directus policy edit, a role misconfiguration, or a schema migration that resets permissions would instantly expose every tenant's project data to the entire internet with no account needed. This guard turns red the moment that happens."
+- **Judge hint (`attackerNextStep`):** "Page through /items/projects, and the sibling collections companies, project_members, directus_users, directus_files, to scrape every tenant's projects, addresses, member emails and files, then leak or sell the data or pivot off the ids and emails."
+
+Why it works: the **headline + body alone tell the whole story** (a non-technical owner learns what is protected and why without reading the request); the body names both the **current safe state** (correctly denied, 403) and the **regression trigger** (the policy edit or migration that would break it), so a future red is self-explaining; and the hint is the **conditional blast radius**, framed as "if it ever opens", not a present-tense claim that the data is already leaking.
 
 ## Authoring a chain
 
@@ -232,6 +262,7 @@ A very common guard type breaks the Step 3 rule "run it and look at the actual s
 - **`successStatusIn: [200]`, `fixedStatusIn: [401, 403]`** (add `429` where a rate-limit denial also counts as the gate holding).
 - You STILL need a positive marker, so the chain CAN reach `vulnerable` on a future regression — but you're choosing it for a 200 you can't observe yet. Pick a **forward-looking marker that describes what a LEAK would look like**: a field that WOULD appear in the body if the gate broke open. For a profile route, `jsonPathsPresent: ["$.email"]`; for a checkout route, `bodyContainsAll: ["checkout.stripe.com"]`; for an admin list, a field only the real payload carries. Prefer a marker you're confident the leaked body would contain.
 - **Expected outcome NOW: `fixed`** — the gate denies you (401/403), which is a **witnessed GREEN and exactly the win you want**. This is not a broken or unfinished test; it is the protection proving itself. If the gate later regresses to a 200, your forward-looking marker matches the now-leaking body and flips the verdict to `vulnerable` — that's the regression alarm firing. Author these as Guards (`watched: true`) so the deploy-replay suite watches the gate forever.
+- **Write the `interpretation` in the GREEN framing** (see "RED vs GREEN framing: match the words to the observed verdict" above): a guard-what-it-protects `headline` and a `whyItMatters` that names the current safe state (correctly denied, 403) plus the regression trigger, NOT the RED "anyone can do X" wording, since the observed result here is the 403 (the gate holding), so an "anyone can do X" claim would be false today.
 - **Honest caveat:** because you're guessing the marker for a body you've never seen, a real future regression could surface as **`inconclusive`** (200 returned, but your guessed field wasn't the one that leaked) rather than a clean `vulnerable`. Mitigate by choosing **robust markers** — a field the route's payload almost certainly carries. And don't treat a suite of all-`fixed` gate-guards as a cop-out: **a clean sweep of witnessed-GREEN gate guards is a valid, honest result** — every gate denied you, which is the whole point.
 
 ### Footguns that fail authors most
