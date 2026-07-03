@@ -149,22 +149,44 @@ ships silently. Author for determinism:
 - **Wait on STATE, never on time.** Use Playwright **web-first** assertions
   (`toBeVisible`, `toHaveURL`, `toHaveText`) and explicit `waitForResponse`/`waitForURL`. **No
   `waitForTimeout(...)` / arbitrary sleeps** — they're either flaky or slow, never both-safe.
-- **Assert on STABLE signals.** A `data-testid`, a route, a status code, a stable heading — not a CSS
-  class, a localized string marketing rewrites weekly, or an animation frame.
+- **Assert on STABLE signals, located the way a user perceives them.** Prefer role / accessible label /
+  visible text; a route or a status code; a stable heading — over a CSS class, a structural XPath, a
+  localized string marketing rewrites weekly, or an animation frame. Use an explicit `data-testid` where
+  the app already exposes one, but black-box against a deployed app you usually cannot add hooks to the
+  source, so role/text is your primary tool, not a fallback.
 - **One acceptance per chain.** Keep gate (b) to a single, crisp criterion. A chain that asserts five
   loosely-related things has five ways to flake and tells you nothing precise when it breaks.
-- **Seed the starting state explicitly.** If a render chain needs a known scan/app/test to exist, make
-  it a **precondition** (a seeded fixture or a setup step), every run — never depend on "whatever
-  happens to be in the database."
+- **Provision preconditions through the app's own surfaces, every run.** Black-box, you cannot touch the
+  database — so if a chain needs a known scan/app/conversation to exist, create it as a **setup step**
+  through the product's real UI or API, the same path a user would, never depending on "whatever happens
+  to be there." **Tag each run's created data with a unique marker** (a per-run id in the name/message)
+  and assert on that marker: with no database to reset, **uniqueness — not cleanup — is what keeps a
+  re-run from colliding with a past one.**
 - **No retries — author so green means green.** The runner runs with no retries so a real FAIL is
   deterministic. Author so a green run is green for the right reason, not because a retry papered over
   a race.
-- **Pin the identity.** A logged-in chain drives a **captured `storageState`**, not a live login (a
-  live magic-link login flakes on email delivery). Upload that session once as a credential and
-  reference it by top-level `credentialId` at ingest — the captured-session credential lifecycle is
-  `chains-reference.md` §9 (and §12 for where it sits in the script-chain body). The one exception is a
-  dedicated login-flow chain that completes a real magic-link round trip — keep that as its own single
-  chain, and keep every other authenticated chain on the captured session.
+- **Pin the identity to a repeatable session.** Prefer a **captured `storageState`** when the login is
+  non-deterministic or expensive — a real magic-link/email round trip, MFA, an SMS OTP to a real phone —
+  because re-driving it every run flakes on delivery. Upload that session once as a credential and
+  reference it by top-level `credentialId` at ingest (lifecycle in `chains-reference.md` §9; placement in
+  §12). When the login is **deterministic** instead — a fixed test OTP or test password with no real
+  email/SMS — driving it inline in the script is equally repeatable, self-refreshing (nothing to
+  re-capture when a session expires), and re-tests the login itself; either is valid. Keep a dedicated
+  magic-link round-trip chain as its own single chain.
+
+> **Context-dependent — decide per chain, don't hardcode a side.** A few choices have no single right
+> answer; pick by the situation rather than a blanket rule:
+> - **Locator:** user-perceivable (role/label/text) vs an explicit `data-testid` — prefer the former;
+>   reach for a test-id only where semantics are absent and the app already exposes one.
+> - **Identity:** captured session vs inline deterministic login — non-deterministic logins get captured,
+>   deterministic ones can go either way.
+> - **Retries:** a retry is a diagnostic, not a fix. A chain that only goes green on a retry is still
+>   flaky — investigate it; never paper a real break over with re-runs.
+> - **Isolation:** a shared reusable identity is fine only for flows that don't mutate durable server
+>   state; use a fresh/unique identity when they do.
+> - **Live vs mocked dependencies:** against a live deployed target you usually cannot and should not mock
+>   the app's own backend — the point is the real integrated system. Don't apply "mock third parties" as a
+>   default.
 
 ---
 
@@ -257,8 +279,8 @@ TWO GATES (each in its own named test.step())
   [ ] Gate (b) ACCEPTANCE: the one crisp expect() for the outcome
 
 DETERMINISM
-  [ ] Web-first waits on state, zero waitForTimeout  [ ] Stable signals (route/status/testid)
-  [ ] Preconditions seeded every run  [ ] Identity via captured storageState, not live login
+  [ ] Web-first waits on state, zero waitForTimeout  [ ] Stable signals (role/text/route/status; testid if present)
+  [ ] Preconditions provisioned via app surfaces + unique marker  [ ] Identity: captured session, or inline deterministic login
 
 COST / INTENT (light touch)
   [ ] Scan-triggering? -> prefer asserting QUEUED over running a full scan (tokens cost money).
