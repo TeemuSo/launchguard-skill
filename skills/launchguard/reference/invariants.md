@@ -12,6 +12,19 @@ they hold — a violation is a bug in any app. That is exactly why they're audit
 the SHOULD is given, so a finding is just the **diff** between what the app *does* (proven black-box)
 and what it *should* (this catalog).
 
+## Contents
+
+- **The metamorphic trick** — assert the relation between two runs, not the absolute answer
+- **The three kinds** — ENGINE (skip; engine-covered) / CHAIN (fit + author) / CODE-REVIEW (finding, not a chain)
+- **A. Authentication** — A1 TLS · A2 missing-token deny · A3 forged / none-alg token · A4 brute-force
+- **B. Authorization** — B1 cross-tenant read · B2 cross-tenant write · B3 forced browsing · B4 traversal · B5 priv-esc · B6 anon read (ENGINE) · B7 anon write
+- **C. Session** — C1 id rotation · C2 logout invalidation
+- **D. Data exposure** — D1 anon array mass-read · D2 client secrets (ENGINE) · D3 error-envelope leak
+- **E. Injection** — E1 SQL/NoSQL · E2 XSS (both CODE-REVIEW)
+- **F. Surface** — F1 headers · F2 source-maps / `.env` · F3 CORS (all ENGINE)
+- **G. Cost / abuse** — G1 unauth paid work · G2 quota bypass · G3 rate limit (CODE-REVIEW)
+- **Dedupe at a glance** — B6, D2, F1, F2, F3 are ENGINE-covered; don't author them
+
 ## How to test without knowing the "right" answer — the metamorphic trick
 
 You usually can't know the *correct* response of an arbitrary endpoint (that needs a spec you don't
@@ -105,7 +118,7 @@ public feed answering anonymously is intended-public and is NOT a finding).
 - **Kind:** CHAIN.
 - **LaunchGuard expression:** `crossTenant` matcher via `spec.env.anonKey` (Supabase-Auth) or a captured-session script for Clerk/Auth0 (`CHAINS.md` Step 3b; `reference/chains-reference.md` §5, §9). The engine `idor` is a `byo_template` (partial).
 - **Severity:** critical
-- **⚠️ Credential ceiling — the engine now returns `inconclusive` (not a false `fixed`) when the second identity can't be provisioned.** The `idor`/cross-tenant mint is **`requiresPro`**, and also fails on a non-Supabase-Auth app or an `sb_publishable_` key. When the second identity **can't be minted**, the cross-tenant boundary was never actually exercised — and the backend now reports that honestly as **`inconclusive`** (`credentialProvenance: "none"`, or a body like `"No API key found"`), **no longer a misleading `fixed`**, so you won't be fooled into reporting a pass. **Don't drop the invariant — AUTHOR the test anyway and SURFACE it**, so the user can run it with the credential it needs (a captured session) or on Pro. The captured test you hand over IS the value. (Still sanity-check `credentialProvenance` on any cross-tenant `fixed`: a real provisioned identity is what makes a `fixed` trustworthy.) Cross-reference `reference/methodology.md` Step 7 (#6, the credential ceiling).
+- **⚠️ Credential ceiling — the engine now returns `inconclusive` (not a false `fixed`) when the second identity can't be provisioned.** The HTTP cross-tenant mint is **FREE, not `requiresPro`**: the engine provisions the second identity via inline Supabase anon-signup with **no server-side Pro check** (an HTTP request-plus-matcher chain, including HTTP cross-tenant, runs free and unbounded). It can still FAIL on a non-Supabase-Auth app or an `sb_publishable_` key (or a signup error). When the second identity **can't be minted**, the cross-tenant boundary was never actually exercised — and the backend now reports that honestly as **`inconclusive`** (`credentialProvenance: "none"`, or a body like `"No API key found"`), **no longer a misleading `fixed`**, so you won't be fooled into reporting a pass. **Don't drop the invariant — AUTHOR the test anyway and SURFACE it**, so the user can run it with the credential it needs — a captured-session script chain, which IS the Pro path (a real-browser run carrying a stored credential → `402 browser_testing_requires_pro` / `402 stored_credentials_require_pro`). The Pro line is that browser / captured-session / custody path, NOT the free HTTP mint. The captured test you hand over IS the value. (Still sanity-check `credentialProvenance` on any cross-tenant `fixed`: a real provisioned identity is what makes a `fixed` trustworthy.) Cross-reference `reference/methodology.md` Step 7 (#6, the credential ceiling).
 - **Fit to THIS app:** from `inventory.supabase.tables[]` + the code, pick a real tenant table and its **owner column** (`user_id` / `org_id` / `tenant_id`) — that column is `crossTenant.ownerJsonPath`. For an app-route IDOR, find a `/api/<resource>/:id` route and seed a real **foreign** id via a `precondition` extractor (`reference/methodology.md` Steps 2–4 — an unguessable UUID with no id-leak surface caps at medium). Pre-flight: `eyJ...` anon key + Supabase Auth, else use a captured-session script — and apply the credential-ceiling rule above to whatever verdict comes back.
 
 ### B2 — Cross-tenant WRITE / DELETE

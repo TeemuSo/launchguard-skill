@@ -6,6 +6,23 @@ Mental model unchanged: a custom test is one HTTP request plus a matcher rule, s
 
 All calls need the user's API key. Per SKILL.md, store it as `LAUNCHGUARD_API_KEY` and send `-H "Authorization: Bearer $LAUNCHGUARD_API_KEY"`.
 
+## Contents
+
+- §0 Proof vs Guard — the `watched` boolean (applies to every chain)
+- §1 The matcher vocabulary (the only assertion fields that exist)
+- §2 JSONPath dialect (the supported subset)
+- §3 Extractors (multi-step chains)
+- §4 Verdict routing (how the engine decides `vulnerable` / `fixed` / `inconclusive`)
+- §5 Worked example: Supabase cross-tenant IDOR
+- §5.1 Worked example: anonymous JSON-array API mass-exposure
+- §6 Validator rules enforced at ingest
+- §7 Endpoint contracts (`GET /api/v1/me`, chains list / get / ingest / patch / run / archive / restore)
+- §8 Current limitations worth telling the author
+- §9 Captured-session credentials (for script chains)
+- §10 Durable disposition (mark a `vulnerable` verdict reviewed / intended)
+- §11 The bridge API: `/context`, `/stacks`, `/coverage`
+- §12 Script / functional chain ingest contract (`artifact:"script"`)
+
 ---
 
 ## 0. Proof vs Guard — `watched` (applies to EVERY chain, HTTP or script)
@@ -185,7 +202,27 @@ Optional and passed through to the engine if present: `step.label`, `step.authRe
 
 ## 7. Endpoint contracts
 
-All require `Authorization: Bearer $LAUNCHGUARD_API_KEY`. Base URL: `https://api.launchguard.dev`. All `/api/v1/*` chain routes are served here.
+All require `Authorization: Bearer $LAUNCHGUARD_API_KEY`. Base URL: `https://api.launchguard.dev`. All `/api/v1/*` chain routes are served here (plus `GET /api/v1/me`, below).
+
+### GET /api/v1/me (identity + chain quota — call before authoring)
+
+Returns which account and key the `lg_` token is bound to, plus the free-tier chain quota. Call it right after resolving the key to announce identity (`CONNECT.md` Step 0.5) and again before authoring, to read `chains.remaining` and avoid authoring work you cannot save.
+
+```bash
+curl -s https://api.launchguard.dev/api/v1/me \
+  -H "Authorization: Bearer $LAUNCHGUARD_API_KEY"
+```
+
+Success `200`:
+```json
+{ "userId": "<id>", "email": "<email>|null", "plan": "pro"|"free",
+  "keyPrefix": "<lg_...>|null", "keyLabel": "<label>|null",
+  "chains": { "active": <n>, "limit": <n>|null, "remaining": <n>|null } }
+```
+
+- `plan` is `"free"` or `"pro"`. For a free key `chains.limit` is `2` and `chains.remaining` is `2 - active` (free accounts keep up to 2 active saved chains); for Pro both are `null` (unlimited saved chains).
+- `chains.remaining === 0` on a free key means the next `POST /api/v1/chains` ingest is refused `402 pro_required`, `reason: "free_chain_limit"` — archive a chain to free a slot, or the caller must be Pro. Read `chains.remaining` BEFORE authoring so you do not spend authoring effort on a chain you cannot save.
+- Errors — `401` (missing/invalid key): symptom = the call returns `401`; cause = the `lg_` token is absent or wrong; fix = re-run `CONNECT.md` Step 0 (device login) to mint a fresh key, then retry.
 
 ### GET /api/v1/chains (list — call this BEFORE authoring)
 
@@ -212,7 +249,7 @@ Body: `{ title, targetHost, severity, spec, source?, watched? }`. `watched` defa
 ```json
 { "chainId": "<uuid>", "autoReplay": true, "sideEffect": "read_only", "watched": false }
 ```
-`autoReplay: true` means the chain is allowed to run. If the request looked mutating (write-style method/path), the response instead carries `"note": "Mutating chain stored as manual-only; it will not auto-run."` — meaning it was stored but won't auto-run, and a `/run` call returns 409. **`title` must be unique among your ACTIVE chains** — re-ingesting a title an active chain already uses fails (`500`), so get the spec right and give each chain a fresh, descriptive title (archiving a chain frees its title to re-ingest cleanly). Errors: `400` (validation / SSRF), `401` (auth), `500` (incl. duplicate active title).
+`autoReplay: true` means the chain is allowed to run. If the request looked mutating (write-style method/path), the response instead carries `"note": "Mutating chain stored as manual-only; it will not auto-run."` — meaning it was stored but won't auto-run, and a `/run` call returns 409. **`title` must be unique among your ACTIVE chains** — re-ingesting a title an active chain already uses fails (`500`), so get the spec right and give each chain a fresh, descriptive title (archiving a chain frees its title to re-ingest cleanly). Errors: `400` (validation / SSRF), `401` (auth), `402` (`pro_required`, `reason: "free_chain_limit"` — a non-Pro account that already holds 2 active saved chains is refused a 3rd; archive one to free a slot, or the caller is Pro for unlimited; also `reason: "credentials_require_pro"` if a free caller ingests a chain carrying a stored credential), `500` (incl. duplicate active title).
 
 ### PATCH /api/v1/chains/:id (modify)
 
@@ -440,7 +477,7 @@ Without `targetHost`, the catalog only. With `targetHost`, each stack ALSO carri
 
 Each row also carries `categories[]` (the specific checks the stack runs) and `scanFlags`.
 
-> **`requiresPro: true` on the `byo_template` stacks (`cost` / `idor` / `broken_access`) is CURRENT server enforcement, not the decided axis.** Per `MONETIZATION.md` (2026-06-29) we gate the system of record, not the act, so authoring depth (writing and running a chain, including authenticated/cross-tenant) is FREE and these template gates are slated to open. Until enforcement catches up, branch on the live `requiresPro` / `402` signal the server actually returns, never a hardcoded tier.
+> **`requiresPro: true` on the `byo_template` stacks (`cost` / `idor` / `broken_access`) is CURRENT server enforcement, not the decided axis.** Per `MONETIZATION.md` (2026-06-29, browser-proof cut 2026-06-30) we gate the system of record, not the act, so authoring depth is FREE — writing a chain, and running it as HTTP (including HTTP cross-tenant, the engine's inline anon-signup mint), is free and unbounded — and these template gates are slated to open. (The exception is the real-browser path: a captured-session / script chain run is Pro — `402 browser_testing_requires_pro`, and a stored-credential run → `402 stored_credentials_require_pro`. So an `idor` fit runs free as an HTTP cross-tenant chain, but its captured-session variant is Pro.) Until enforcement catches up, branch on the live `requiresPro` / `402` signal the server actually returns, never a hardcoded tier.
 
 ### POST /api/v1/coverage: toggle a default check
 

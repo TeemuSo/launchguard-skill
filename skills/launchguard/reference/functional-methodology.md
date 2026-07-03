@@ -29,6 +29,31 @@ security testing. The two-gate rule below is the cure.
 > — if you do, the HTTP runner silently wins and your script is never executed (§12's footgun). An
 > authenticated functional chain references a captured session by top-level `credentialId` (§9).
 
+> **⚠️ PLAN GATE — running a functional/script chain is a real-browser run, which is PRO.** A functional
+> chain executes a Playwright spec in a real/hosted browser. Running a chain in a real/hosted browser
+> (`artifact:"script"`, Browserbase) is PRO — a non-Pro caller gets `402 browser_testing_requires_pro`.
+> A chain carrying a stored credential (an authenticated functional chain via `credentialId`) is also Pro
+> (`402 stored_credentials_require_pro`). So a functional/script chain runs — and re-runs as a Guard on
+> every deploy — ONLY on a confirmed-Pro account. **When authoring for a FREE or unknown-plan account,
+> DEFAULT TO HTTP-artifact chains** (the request-plus-matcher chains in `CHAINS.md`: HTTP runs, including
+> HTTP cross-tenant, are FREE and unbounded); author script/browser chains only when the account is
+> confirmed Pro, and branch on the live server signal (`402` / `requiresPro`), never a hardcoded tier.
+> (The free own-machine counterpart is **LaunchProof** — a local Playwright e2e harness that runs
+> real-browser proof in the user's OWN browser on their OWN machine at zero hosted-browser cost; the
+> HOSTED browser e2e we run is Pro.)
+
+---
+
+## Contents
+
+- **Step 1 — PICK** the right functional chains (revenue-critical, deterministic, two-gate-able)
+- **Step 2 — the TWO-GATE pattern**: gate (a) desired-state reached, gate (b) acceptance criteria
+- **Step 3 — determinism / anti-flake** rules
+- **Step 4 — cost & intent** for expensive/irreversible steps (scan spend, checkout, login email)
+- **Step 5 — verdict mapping**: PASS = `fixed` = working, FAIL = `vulnerable` = broken, ERROR = `inconclusive`
+- **Step 6 — Proof or Guard?** (`watched`); watching a script chain is Pro (`402 browser_testing_requires_pro`)
+- **Quick pre-authoring checklist** + **What still needs a human**
+
 ---
 
 ## Step 1 — PICK the right functional chains (don't test everything)
@@ -207,7 +232,12 @@ A functional chain is one of two classes, exactly like an HTTP chain (see "Proof
   alerting on regression (a `fixed`/working chain that comes back `vulnerable`/broken).
 
 **Most functional chains are worth watching** — proving a flow "still works after a deploy" is the
-whole point of a deploy-gate, so a functional Guard is the natural goal. But still **default to Proof
+whole point of a deploy-gate, so a functional Guard is the natural goal. **But a watched functional Guard
+re-runs a real/hosted browser on every deploy, which is metered Pro compute — so continuous browser
+watching is a PRO capability, and a non-Pro deploy re-run is refused with `402 browser_testing_requires_pro`.**
+On a FREE or unknown-plan account, don't promote a script chain to a Guard; guard the invariant with an
+HTTP-artifact chain where it can be expressed as HTTP (free, unbounded), or hand the browser proof over as
+LaunchProof to run on the user's own machine. But still **default to Proof
 and promote deliberately**: confirm the chain is green and non-flaky on its first run, then set
 `watched: true` (ingest it that way, or `PATCH /api/v1/chains/<id> { "watched": true }`). Promoting a
 flaky chain to a Guard is how you teach a user to mute LaunchGuard. Only watch a chain you've seen pass

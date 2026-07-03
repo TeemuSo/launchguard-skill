@@ -30,9 +30,20 @@ After both, you'll have a picture of what the scan saw and what the code review 
 
 > **LaunchGuard also verifies that a flow WORKS (functional chains) and can run as a real authenticated user (captured-session chains), not just what's exposed.** See `CHAINS.md`.
 
-> **The scan needs NO account and NO API key.** Just a publicly reachable URL. It's free (50/hour per IP). Power-user features — monitoring on every deploy, custom Bring-Your-Own tests, connect — use your LaunchGuard account, and logging in is one browser click (see `CONNECT.md`). Authoring and running tests is free; the paid layer is persistence (stored sessions, monitoring, memory), not the act. But the core scan below requires nothing.
+> **The scan needs NO account and NO API key.** Just a publicly reachable URL. It's free (50/hour per IP). Power-user features — monitoring on every deploy, custom Bring-Your-Own tests, connect — use your LaunchGuard account, and logging in is one browser click (see `CONNECT.md`). **Authoring default (get this right up front):** for a FREE or unknown-plan account, author HTTP-artifact chains — authoring and HTTP runs (raw request replay, including HTTP cross-tenant) are free and unbounded, and free accounts keep up to 2 active saved chains; author a script / real-browser chain (`artifact:"script"`) only when the account is confirmed Pro. Branch on the live `requiresPro` / `402` signal, never a hardcoded tier. The full free/paid mapping (the `402` family, the fix's `locked:"signup"`) is the decision table in **Important notes** below. But the core scan below requires nothing.
 
 > **Before you call anything a "finding" — read `reference/methodology.md` in this skill directory.** It is the pentester judgment layer: an ordered procedure (threat-model → reachability-from-fresh-state → enumerability → escalation → honest severity → intended-public filter → validation gate) that turns raw "the endpoint answered 200" into a defensible finding, and filters out the false positives a non-expert would otherwise ship. Load it for any "check my app" / "is this secure" / "find my vulnerabilities" request.
+
+---
+
+## Contents
+
+- **What the external scan verifies** / **What the code review verifies** — the two checks
+- **How to run** — Step 1 confirm target · 2 start scan · 3 stream · 4 report · 5 code review · 6 verify + fix (Phase A) · 7 prove one boundary (Phase B) · optional full deep audit
+- **Boundaries** — what the free scan does and does not do
+- **Communication** — non-technical framing
+- **Important notes** — rate limit, scan link, the free/paid decision table (canonical in this skill)
+- **Next steps** — `CONNECT.md`, `CHAINS.md`, `AUDIT.md`, `reference/methodology.md`
 
 ---
 
@@ -179,7 +190,7 @@ If they say yes, follow **`AUDIT.md`**: it walks every invariant in `reference/i
 
 - The **free scan** does NOT perform exploitation, load testing, rate limit testing, credential stuffing, or any active attack. It probes and observes. (Authoring a **Bring Your Own Test** chain — see `CHAINS.md` — is a separate opt-in flow that reproduces ONE read-only exploit against the user's domain, sending the minimum requests.)
 - Does NOT do SQL injection, XSS testing, brute force, or DDoS simulation.
-- The free external **scan** does NOT do authenticated scanning (it observes only the unauthenticated surface). Authenticated and multi-actor testing IS part of the product, via captured-session **chains** (see `CHAINS.md`): they run as a real logged-in user, or as two different accounts/roles. Per the decided axis (`MONETIZATION.md`), the paid gate is persistence/continuity (stored sessions, monitoring, memory), NOT the one-shot authenticated run; so branch on the server's runtime entitlement signals (`requiresPro` / `402`), never on a hardcoded tier claim.
+- The free external **scan** does NOT do authenticated scanning (it observes only the unauthenticated surface). Authenticated and multi-actor testing IS part of the product, via captured-session **chains** (see `CHAINS.md`): they run as a real logged-in user, or as two different accounts/roles. Per the decided axis (`MONETIZATION.md`), the one FREE "authenticated-style" run is the anonymous-key HTTP cross-tenant path: running a chain as HTTP (raw request replay, near-zero cost) is FREE and unbounded, including HTTP cross-tenant (the engine's own inline anon-signup mint). But a captured-session chain is a real-browser (script) run carrying a stored credential, so it IS Pro: a non-Pro caller gets `402 browser_testing_requires_pro` (real-browser run) or `402 stored_credentials_require_pro` (stored credential). So branch on the server's runtime entitlement signals (`requiresPro` / `402`), never on a hardcoded tier claim.
 - ALWAYS confirm target URL with user before scanning. Only scan domains they own.
 - ONLY report issues that appear in scan data or that you can see in the code. Never speculate.
 - When presenting secrets, redact (show first 8 chars + "..."). Never output full keys.
@@ -194,7 +205,20 @@ Users are often non-technical builders (Cursor, Lovable, Bolt). Explain in busin
 - Scans are free, no account needed. Rate limit: 50/hour per IP (HTTP 429 if exceeded).
 - All write probes use rollback transactions — nothing is modified on the target.
 - Scan results link: `https://www.launchguard.dev/scan/{scanId}`
-- **Free/paid boundary (canonical):** `MONETIZATION.md` (decided 2026-06-29; free browser proof cut 2026-06-30) is the source of truth: we gate the system of record, not the act. The scan, the AI-authored fix, unlimited depth, and an HTTP red/green verdict (including HTTP cross-tenant) are free; real-browser (script / Browserbase) testing is Pro, and the rest of the paid layer is persistence (stored sessions, on-deploy monitoring, memory). The CURRENT server signals you actually branch on are: `requiresPro` (on `/context` `byo_template` rows) and the `402` family, namely `browser_testing_requires_pro` (a non-Pro real-browser / script chain run), `stored_credentials_require_pro` (running a stored-credential chain), and `pro_required` (active verification, AI verdict, stepped chains). The old `e2e_volume_requires_pro` reason and the per-host free-proof bound no longer exist; a non-Pro HTTP chain run is free and unbounded. The assembled fix is free for an authenticated owner; its only locked shape is `locked:"signup"` for an anonymous caller (a signup wall, not a paywall), and there is no `locked:"pro"` for the fix. Server enforcement may still lag the decided axis, so always branch on the live server signal, never a hardcoded tier claim.
+- **Free/paid boundary (canonical in this skill).** The rationale — "we gate the system of record, not the act" — lives in `MONETIZATION.md` (decided 2026-06-29; free browser proof cut 2026-06-30); do not re-derive it. What you branch on:
+
+| Action | Free? | Server signal when gated |
+|---|---|---|
+| Anonymous scan, full findings, unlimited depth | Free | — |
+| AI-authored fix, authenticated owner | Free | anonymous caller → `fixPrompt.locked: "signup"` (a signup wall, not a paywall; there is no `locked: "pro"` for the fix) |
+| HTTP chain run (request replay), incl. HTTP cross-tenant | Free, unbounded | — |
+| Saving custom chains | Free up to **2 active** (authoring + running are free; *storing* is the gate) | 3rd active ingest → `402 pro_required`, `reason: "free_chain_limit"` (archive one to free a slot; Pro = unlimited saved chains) |
+| Real-browser / script run (`artifact:"script"`, Browserbase) | Pro | `402 browser_testing_requires_pro` |
+| Running a chain carrying a stored credential | Pro | `402 stored_credentials_require_pro` |
+| Active verification, AI verdict, stepped chains | Pro | `402 pro_required` |
+| `byo_template` depth gates (`cost` / `idor` / `broken_access`) | current server enforcement | `requiresPro: true` on the `/context` `byo_template` row |
+
+  Pro is also the persistence layer (stored sessions, on-deploy monitoring, memory). Always branch on the live signal (`requiresPro` / the `402` family / `locked`), never a hardcoded tier — server enforcement may still lag the decided axis. **Deprecated (gone):** the old `e2e_volume_requires_pro` reason and the per-host free-proof bound no longer exist; a non-Pro HTTP chain run is free and unbounded.
 
 ---
 

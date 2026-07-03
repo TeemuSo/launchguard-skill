@@ -27,6 +27,16 @@ or a code-review finding. This goes WAY deeper than the free scan.
 
 ---
 
+## Contents
+
+- **When to run** — triggers; the heavier opt-in beyond the single Phase-B test
+- **Prerequisites** — authenticated + connected, read `/context` and `reference/methodology.md` first, local source
+- **The procedure** — walk `reference/invariants.md` A→G, branching per invariant kind (ENGINE / CHAIN / CODE-REVIEW)
+- **Output** — the per-invariant report (engine-covered / clean / vulnerable / code-review finding / authored-awaiting-run / not-applicable)
+- **Cross-links** — invariants, chains, connect, methodology
+
+---
+
 ## When to run
 
 Trigger this on: "deep audit", "thorough security review", "audit everything", "go deeper than the
@@ -128,8 +138,16 @@ This is the core of the audit. For each:
      `http`→`https`). `allowedTargets.primary` must byte-match the FINAL host, so a chain aimed at the apex
      can 307→`www` and read a false `inconclusive`. Target the canonical / resolved host (e.g. `www.…`).
      See `reference/invariants.md` A2.
-5. **Default to Proof.** Author these `watched: false` while auditing so you don't flood the user's
-   deploy-replay suite. Promote the handful worth watching forever to Guards (`watched: true`) at the end.
+5. **Default to Proof — and mind the free 2-chain cap.** Author these `watched: false` while auditing so
+   you don't flood the user's deploy-replay suite. Promote the handful worth watching forever to Guards
+   (`watched: true`) at the end. **On a FREE (non-Pro) account, only up to 2 active saved tests (custom
+   chains) are kept — a 3rd ingest is refused with `402 pro_required`, `reason: "free_chain_limit"`.** So
+   you CANNOT save a full A–G pass of chains on a free key: expect `free_chain_limit`, and PRIORITIZE the
+   ≤2 highest-impact boundaries to save (archiving a chain frees a slot; Pro is unlimited saved chains).
+   For the rest, report the fit as an authored-but-unsaved finding or surface it as the Pro upgrade.
+   **Read the plan and budget up front with `GET /api/v1/me`** (`chains.remaining`; contract in
+   `reference/chains-reference.md` §7) so you know how many of the sweep you can save before you author
+   it — don't assume you can store the whole A–G pass.
 
 ### If the invariant is CODE-REVIEW (A4, E1, E2, F3-as-code, G3)
 Inspect the code and report a finding — **never** author a chain that fakes a verdict for it (rate-limit,

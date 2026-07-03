@@ -2,6 +2,14 @@
 
 Link a project to LaunchGuard for ongoing protection (re-scan on every deploy), custom tests, and the `/context` bridge loop. This is the power-user layer on top of the free scan in `SKILL.md`.
 
+## Contents
+
+- **Step 0** — Authenticate (one-click device login), or **Step 0 (funnel)** — pairing-code onboarding
+- **Step 0.5** — State which account you're operating as (`GET /api/v1/me`), before connecting
+- **Connect to LaunchGuard** — `POST /api/v1/connect` (the lightweight handshake)
+- **Start expert: read `/context` first** — the six-step bridge loop; `/context` / `/stacks` / `/coverage` contracts
+- **Then: author ONE tailored, business-logic test** — Phase A (verify), Phase B (prove one boundary)
+
 ## Step 0: Authenticate (one-click, first time only)
 
 Power-user features (monitoring, custom tests, connect) use your LaunchGuard account.
@@ -11,7 +19,7 @@ Logging in is ONE browser click — no keys to copy or paste.
    ```bash
    cat ~/.launchguard/credentials 2>/dev/null
    ```
-   If it has a `token` starting `lg_`, use that as the Bearer and skip the rest.
+   If it has a `token` starting `lg_`, use that as the Bearer, skip to **Step 0.5** (announce which account the key belongs to), then connect.
 
 2. Start a device login:
    ```bash
@@ -36,7 +44,7 @@ Logging in is ONE browser click — no keys to copy or paste.
    mkdir -p ~/.launchguard && printf '{"token":"%s"}' "<access_token>" > ~/.launchguard/credentials && chmod 600 ~/.launchguard/credentials
    export LAUNCHGUARD_API_KEY="<access_token>"
    ```
-   On later runs, read the token from `~/.launchguard/credentials` instead of logging in again.
+   On later runs, read the token from `~/.launchguard/credentials` instead of logging in again. Then do **Step 0.5** to announce which account this key belongs to before connecting.
 
 ---
 
@@ -77,13 +85,32 @@ The trigger key is the `Pairing code:` line — its value is the `device_code` y
    export LAUNCHGUARD_API_KEY="<access_token>"
    ```
 
-3. **Then fall into the existing flow below — do not re-derive or duplicate it.** With the key set, continue exactly as the normal connect path, then run the two-phase flow. The scan produces OBSERVATIONS, not verdicts — never treat the scanner's `exposed` / `amber` / `secured` state as a decision:
+3. **Then fall into the existing flow below — do not re-derive or duplicate it.** With the key set, **first run Step 0.5 (announce which account you're operating as)**, then continue exactly as the normal connect path and run the two-phase flow. The scan produces OBSERVATIONS, not verdicts — never treat the scanner's `exposed` / `amber` / `secured` state as a decision:
    - **Connect:** `POST /api/v1/connect` using the target URL from the FIRST sentence of the prompt (`...review a security boundary on <TARGET_URL>.`) — there is no `Target:` line (see "Connect to LaunchGuard" below). The moment connect returns, show the human its `dashboardUrl` (`https://launchguard.dev/app/<id>`) right away, so they have a live page to open while the deep step runs: "Open this to follow along and run your test yourself. It'll be ready in a few minutes: <dashboardUrl>."
    - **Read `/context`:** run the bridge loop (see "Start expert: read /context first").
    - **Phase A — orient & verify (only when the scan saw something):** surface what `/context` SAW — its `findings` / `inventory` — to the user in plain language AS OBSERVATIONS. For each, read the code's intent and decide WITH THE USER whether it is intended-public or a real problem, applying the intended-public filter (an aggregate counter, a published pricing list, or a public feed answering anonymously is NOT a finding). Fix and prove ONLY the items the user confirms are real problems. LaunchGuard does not pre-decide this; you and the user do. **Skip Phase A entirely when the scan saw nothing** — a clean / GREEN app has no observations to triage, so go straight to Phase B.
    - **Phase B — go deeper (identical for every outcome; this is exactly where a GREEN / clean app STARTS):** prove or break the ONE boundary that matters — cross-tenant read, IDOR, paywall, or cost-sink — the business-logic boundary a perimeter scan cannot see. Framing is OUTCOME-NEUTRAL: a witnessed GREEN counts as much as a RED; NEVER set out to "find a vulnerability" and never manufacture a finding. Author ONE tailored test from `/context`'s `recommendations[]` / `coverageGaps[]`, submit it as a saved Proof (leave `"watched"` unset; it defaults to `false`), run it, let LaunchGuard's verdict engine adjudicate, and **report the verdict**. (Watching it on every deploy is a separate opt-in step the user takes later, not part of this first run.) This is exactly the "Then: author ONE tailored, business-logic test" section below. RED, AMBER, and GREEN all converge onto this SAME Phase B.
 
 **Why this skips the approval round trip:** the browser already did the auth and created a pre-approved pairing, so Claude Code just claims the key the website authorized — the interactive device-approval step is intentionally skipped, not forgotten.
+
+---
+
+## Step 0.5: State which account you're operating as (`GET /api/v1/me`) — before connecting
+
+**Un-skippable: the moment an `lg_` key is set (from EITHER Step 0 path above), call `GET /api/v1/me` and STATE the identity to the user before you connect, author, or run anything.** An agent/CLI otherwise cannot tell which account or key it is bound to — a machine often carries several `lg_` keys, and acting as the wrong one silently touches the wrong account's chains and quota.
+
+```bash
+curl -s https://api.launchguard.dev/api/v1/me \
+  -H "Authorization: Bearer $LAUNCHGUARD_API_KEY"
+```
+
+Returns `200` `{ userId, email, plan, keyPrefix, keyLabel, chains: { active, limit, remaining } }` (full contract in `reference/chains-reference.md` §7). Then say it plainly, e.g.:
+
+> Operating as `<email>` — plan `<plan>`, key `<keyPrefix>` (`<keyLabel>`), `<active>`/`<limit>` saved chains used.
+
+- For a Pro key `chains.limit` is `null` — say "unlimited saved chains" rather than `<active>`/`null`.
+- `chains.remaining` is your authoring budget on a free key (2 active max). Carry it into the pre-flight quota check before authoring (`CHAINS.md` Step 2).
+- `401` (missing/invalid key): re-run Step 0 (device login) to mint a fresh key, then retry.
 
 ---
 
@@ -201,6 +228,8 @@ Toggles a toggleable engine stack on or off (merge-write). Live success shape:
 ### Then: author ONE tailored, business-logic test (from /context's recommendations)
 
 Connecting alone is enough to show "Connected". But the moment that makes LaunchGuard worth keeping is a custom test specific to THIS app, the thing a generic scanner cannot write because it never read the code. You no longer derive that rule blind: `/context` already told you the gaps.
+
+> **Free-tier shape for a connecting key (author within it).** For a FREE (non-Pro) account: authoring is free, and running a chain as HTTP (raw request replay, near-zero cost) is FREE and unbounded, including HTTP cross-tenant; free accounts keep up to 2 active saved tests (custom chains) — a 3rd ingest is refused with `402 pro_required`, `reason: "free_chain_limit"` (archiving frees a slot). Running a chain in a real/hosted browser (`artifact:"script"`, Browserbase) is PRO (`402 browser_testing_requires_pro`), and a chain carrying a stored credential is Pro (`402 stored_credentials_require_pro`). So the onboarding default — ONE tailored HTTP-artifact Proof — sits well within the free tier; author a script/browser or captured-session chain only when the account is confirmed Pro. Branch on the live `402` / `requiresPro` signal, never a hardcoded tier.
 
 **First, Phase A — present the observations, confirm intent.** The scan produces OBSERVATIONS, not verdicts: never treat its `exposed` / `amber` / `secured` state as a decision. When `/context` SAW something (`findings` / `inventory`), surface each item to the user in plain language AS AN OBSERVATION, read the code's intent, and decide WITH THE USER whether it is intended-public or a real problem — applying the `reference/methodology.md` Step 6 intended-public filter (an aggregate counter, a published pricing list, or a public feed answering anonymously is NOT a finding). Fix and prove ONLY what the user confirms is a real problem; LaunchGuard does not pre-decide this. When the scan saw nothing, there is nothing to triage — skip straight to Phase B below.
 
