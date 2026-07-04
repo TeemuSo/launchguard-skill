@@ -24,10 +24,12 @@ security testing. The two-gate rule below is the cure.
 >
 > **To INGEST one, follow `chains-reference.md` §12 — the script-chain ingest contract — exactly.** The
 > body is FLAT: top-level `artifact:"script"` + the Playwright spec as a top-level `script` STRING (it
-> is stored and read back at `spec.script.source`), with the `// @lg-intent:` / `// @lg-secure-when:`
-> header tags **declared in the source, colons required**. Do NOT send `spec.steps` / `spec.assertion`
-> — if you do, the HTTP runner silently wins and your script is never executed (§12's footgun). An
-> authenticated functional chain references a captured session by top-level `credentialId` (§9).
+> is stored and read back at `spec.script.source`), with the intent declared as native Playwright
+> metadata in the test-details object — a `@functional` (or `@security`) tag, plus a
+> `{ type: 'secure-when', description: 'pass' }` annotation for a security test. Do NOT send
+> `spec.steps` / `spec.assertion` — if you do, the HTTP runner silently wins and your script is never
+> executed (§12's footgun). An authenticated functional chain references a captured session by top-level
+> `credentialId` (§9).
 
 > **⚠️ PLAN GATE — running a functional/script chain is a real-browser run, which is PRO.** A functional
 > chain executes a Playwright spec in a real/hosted browser. Running a chain in a real/hosted browser
@@ -106,12 +108,11 @@ judged the page. (This is the `test.step()` authoring contract the UI surfaces.)
 ### Concrete example — "free user is paywalled on a Pro action"
 
 ```ts
-// @lg-intent: functional
-// @lg-secure-when: pass   // functional: PASS = the flow behaves as required
-
 import { test, expect } from "@playwright/test";
 
-test("free user hits the Pro paywall", async ({ page, baseURL }) => {
+test("free user hits the Pro paywall", {
+  tag: "@functional", // functional intent: PASS = the flow behaves as required
+}, async ({ page, baseURL }) => {
   // Gate (a): DESIRED STATE — prove the request reached a REAL authenticated identity,
   // not the anonymous 401 an unauthenticated probe would see. Without this, a 401 from a
   // dropped session would look like "the gate fired" and pass by accident.

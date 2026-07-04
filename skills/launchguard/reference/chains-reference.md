@@ -515,7 +515,7 @@ The engine picks the **script (Playwright) runner** vs the **HTTP request-plus-m
   "source": "ai_agent",
   "watched": false,
   "artifact": "script",
-  "script": "// @lg-intent: functional\n// @lg-secure-when: pass\nimport { test, expect } from \"@playwright/test\";\n\ntest(\"home renders with a scan entry point\", async ({ page, baseURL }) => {\n  await test.step(\"reach the home page\", async () => {\n    await page.goto(\"/\", { waitUntil: \"domcontentloaded\" });\n    await expect(page).toHaveURL(new RegExp(`^${baseURL}/?$`));\n  });\n  await test.step(\"scan entry point is present\", async () => {\n    await expect(page.getByRole(\"button\", { name: /scan/i })).toBeVisible();\n  });\n});",
+  "script": "import { test, expect } from \"@playwright/test\";\n\ntest(\"home renders with a scan entry point\", {\n  tag: \"@functional\",\n}, async ({ page, baseURL }) => {\n  await test.step(\"reach the home page\", async () => {\n    await page.goto(\"/\", { waitUntil: \"domcontentloaded\" });\n    await expect(page).toHaveURL(new RegExp(`^${baseURL}/?$`));\n  });\n  await test.step(\"scan entry point is present\", async () => {\n    await expect(page.getByRole(\"button\", { name: /scan/i })).toBeVisible();\n  });\n});",
   "sideEffect": "read_only",
   "allowedTargets": { "primary": "dev.launchguard.dev" }
 }
@@ -531,23 +531,38 @@ The engine picks the **script (Playwright) runner** vs the **HTTP request-plus-m
 | `targetHost` | required | the monitored host; passes the SSRF / DNS guard |
 | `severity` | required | `critical` / `high` / `medium` / `low` |
 | `artifact` | **required, = `"script"`** | the discriminator; omit it and you get an HTTP chain (the footgun above) |
-| `script` | **required** | the `@playwright/test` spec as a STRING. Must contain a `// @lg-intent:` header, a `test(...)` block, and ≥1 `expect(...)`. Max 200 KB |
+| `script` | **required** | the `@playwright/test` spec as a STRING. Must declare a native intent tag (`tag: '@security'` or `'@functional'`) in the test-details object, a `test(...)` block, and ≥1 `expect(...)`. Max 200 KB |
 | `source` | optional | defaults to `"ai_agent"` |
 | `watched` | optional | defaults `false` (Proof). See §0 |
 | `sideEffect` | optional | `"read_only"` or `"mutation"`; **defaults to `"mutation"`** (a browser click can write). A read-only functional render chain must set `"read_only"` explicitly so it can auto-run as a Guard |
-| `destructive` | optional | boolean; OR'd with the `// @lg-destructive: true` header. When true, forces `sideEffect:mutation` (manual-only) |
+| `destructive` | optional | boolean; OR'd with the native `@destructive` tag. When true, forces `sideEffect:mutation` (manual-only) |
 | `credentialId` | optional | the opaque envelope id from `POST /api/v1/chains/credentials` (§9) — runs the script authenticated as that captured session |
 | `allowedTargets` | optional | `{ primary?, supabase?, api? }`; `primary` defaults to `targetHost`. Scripts use relative paths; the host resolves from here |
 
-> **`intent` and `secureWhen` are read from the SOURCE HEADER TAGS, not from body fields.** The validator parses them out of the `script` string (below). Declare them in the spec header — a top-level `intent` body field does not drive the build.
+> **`intent` and `secureWhen` are read from the source's native Playwright metadata, not from body fields.** The validator parses them statically out of the `script` string's test-details object (below). Declare them there — a top-level `intent` / `secureWhen` body field does not drive the build.
 
-### The header tags (parsed from the `script` source — the colon is mandatory)
+### Native Playwright metadata (parsed from the test-details object)
 
-The validator scans for three `//`-comment tags ANYWHERE in the source. **The colon is required** — `// @lg-intent functional` (no colon) is REJECTED with `400 script must declare its intent`:
+The validator reads the test's metadata **statically** from the **test-details object** — the optional 2nd positional argument to `test()` (`test(title, details, fn)`). This is idiomatic `@playwright/test`; there is NO LaunchGuard-specific comment convention (the old magic-comment tags have been fully removed, and there is no legacy fallback). Declare intent (and, for a security test, secure-when) there:
 
-- `// @lg-intent: security` **or** `// @lg-intent: functional` — **REQUIRED.** Drives the PASS→`fixed` / FAIL→`vulnerable` framing.
-- `// @lg-secure-when: pass` — **REQUIRED for `security` intent** (the test PASSES when the app is SECURE, so a broken run routes to `inconclusive`, never a false verdict). Optional for `functional`.
-- `// @lg-destructive: true` — optional; forces `sideEffect:mutation` (the same manual-only gate as a non-GET HTTP chain) for a functional script that writes state through the browser.
+```ts
+import { test, expect } from "@playwright/test";
+
+test("anon visitor is gated from sending chat", {
+  tag: ["@security", "@destructive"],                      // intent tag @security|@functional ; @destructive optional
+  annotation: [
+    { type: "secure-when", description: "pass" },           // REQUIRED for @security intent
+    { type: "meaning", description: "Red means strangers can send paid chat messages." }, // optional
+  ],
+}, async ({ page }) => {
+  // ... the expect()s ARE the matcher ...
+});
+```
+
+- **intent — REQUIRED.** A native tag `@security` **or** `@functional` on the test. `tag` may be a string (`tag: '@security'`) or an array (`tag: ['@functional', '@destructive']`). It drives the PASS→`fixed` / FAIL→`vulnerable` framing. Missing → `400 script must declare its intent`.
+- **secure-when — REQUIRED for `@security` intent.** A native annotation `{ type: 'secure-when', description: 'pass' }` (MVP: only `pass` — the test PASSES when the app is SECURE, so a broken run routes to `inconclusive`, never a false verdict). Optional for `@functional`. Missing on a `@security` chain → 400.
+- **`@destructive` — optional.** A native tag; its presence (`⇒ true`) forces `sideEffect:mutation` (the same manual-only gate as a non-GET HTTP chain) for a script that writes state through the browser. It is OR'd with the top-level body `destructive` boolean.
+- **meaning — optional.** A native annotation `{ type: 'meaning', description: '...' }`, stored on `spec.script.meaning` — a one-line, owner-facing plain-English reading of a red result. May later seed a default owner-facing meaning.
 
 Import allowlist is strict: a script may import ONLY `@playwright/test` (or `playwright` / `playwright/test`). Any other `import` / `require` / dynamic `import()` is rejected at ingest — move helpers inline.
 
@@ -570,9 +585,10 @@ Upload the session once (`POST /api/v1/chains/credentials`, §9) → get a `cred
     "sideEffect": "read_only",
     "allowedTargets": { "primary": "dev.launchguard.dev" },
     "script": {
-      "source": "// @lg-intent: functional ...",
+      "source": "import { test, expect } from '@playwright/test'; test('home renders...', { tag: '@functional' }, ...)",
       "intent": "functional",
       "secureWhen": "pass",
+      "meaning": "Red means the marketing home lost its scan entry point.",
       "steps": ["reach the home page", "scan entry point is present"],
       "identity": { "label": "free-tier user", "metadata": { "tier": "free" } },
       "hasCredential": true
@@ -583,6 +599,7 @@ Upload the session once (`POST /api/v1/chains/credentials`, §9) → get a `cred
 
 - The Playwright source is **`spec.script.source`** on read-back (top-level `script` STRING at ingest, `spec.script.source` once stored). **Dedupe script chains by diffing THIS field** (or by title), never by the constant exploit summary — see SKILL.md Step 2 carve-out.
 - `spec.script.steps[]` are the `test.step("…")` titles parsed at ingest (the pre-run checklist), index-aligned with the live `step` SSE events.
+- `spec.script.meaning` (optional) is the author's one-line owner-facing reading of a red result, parsed from the `{ type: 'meaning' }` annotation; it is absent when the test declared none.
 - `script.credential` (the encrypted session) is NEVER echoed — it is replaced by a `hasCredential` boolean. `script.identity` (non-secret) IS returned.
 - Every script chain's list-row `exploit` summary collapses to the constant `(PLAYWRIGHT, "(script chain)", primary)`.
 
