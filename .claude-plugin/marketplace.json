@@ -1,0 +1,18 @@
+{
+  "name": "launchguard-skill",
+  "owner": {
+    "name": "LaunchGuard",
+    "url": "https://launchguard.dev"
+  },
+  "metadata": {
+    "description": "LaunchGuard security scanner for Claude Code. One plugin: scan your live app from the outside and fix what it finds."
+  },
+  "plugins": [
+    {
+      "name": "launchguard",
+      "source": "./",
+      "description": "External security scanner for live web apps. Finds exposed APIs, broken Supabase/Firebase rules, leaked secrets, and cost-sinkhole endpoints — from the outside, like an attacker would.",
+      "version": "1.2.0"
+    }
+  ]
+}

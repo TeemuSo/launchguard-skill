@@ -17,22 +17,19 @@ LaunchGuard scans your **live, deployed application** from the outside — the s
 
 ## Install
 
-**Claude Code:**
-```
-/install-plugin https://github.com/TeemuSo/launchguard-skill
+**Claude Code** (paste into your terminal):
+```bash
+claude plugin marketplace add TeemuSo/launchguard-skill && claude plugin install launchguard@launchguard-skill
 ```
 
-**Any agent (Claude Code, Cursor, Codex, Gemini CLI, Copilot, Windsurf, Cline):**
+Then open a new Claude Code session and say "scan my app".
+
+**Other agents (Cursor, Codex, Gemini CLI, Copilot, Windsurf, Cline):**
 ```
 npx skills add TeemuSo/launchguard-skill
 ```
 
-**Manual:**
-```bash
-mkdir -p ~/.claude/skills/launchguard
-curl -o ~/.claude/skills/launchguard/SKILL.md \
-  https://raw.githubusercontent.com/TeemuSo/launchguard-skill/main/skills/launchguard/SKILL.md
-```
+Note: `npx skills` installs to `.agents/skills/`, which Claude Code does not read. For Claude Code, use the command above.
 
 ## Usage
 
