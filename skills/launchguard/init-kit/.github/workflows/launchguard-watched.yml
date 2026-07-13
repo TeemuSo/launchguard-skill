@@ -1,0 +1,90 @@
+# LaunchGuard watched tier: the black-box @watched subset against the PR's own
+# preview. The agent customizes the marked spots per repo (see INIT.md).
+#
+# TWO THINGS THAT SILENTLY BREAK THIS IF LEFT AS-IS:
+#  1. `deployment_status.environment` is the Vercel project's environment name.
+#     On a multi-project repo it is like `Preview – my-app` (an en-dash, one per
+#     project), NOT `Preview`. Enumerate the real names and PIN the app's:
+#       gh api repos/{owner}/{repo}/deployments --paginate --jq '.[].environment' | sort -u
+#     A wrong name means this workflow never runs, and an absent check reads as green.
+#  2. deployment_status only triggers from the workflow file on the DEFAULT branch,
+#     so this cannot fire on the PR that adds it. Use the workflow_dispatch below to
+#     prove the lane before relying on the auto-trigger.
+name: LaunchGuard (watched)
+
+on:
+  deployment_status:
+  workflow_dispatch:
+    inputs:
+      target_url:
+        description: 'Preview URL to test (proves the lane before the auto-trigger works)'
+        required: true
+
+# Serialize across runs: a shared non-prod backend plus a fixed test identity means
+# two PRs at once collide. Queue, do not cancel.
+concurrency:
+  group: launchguard-watched
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  watched:
+    # AGENT: replace the environment string with the exact enumerated name for the
+    # app project (e.g. 'Preview – my-app'). Manual dispatch has no deployment_status,
+    # so allow it through too.
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.deployment_status.state == 'success' &&
+       github.event.deployment_status.environment == 'Preview – REPLACE-ME')
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: .   # AGENT: set to the app package (e.g. a monorepo package dir)
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 8.15.6
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      # AGENT: install only the browsers the watched specs use. A real-payment
+      # journey should run one browser only (a second run pays a second time).
+      - name: Install Playwright browsers
+        run: npx playwright install --with-deps chromium
+
+      # AGENT: companion services from APP-PROFILE.md, if a flow needs one
+      # (e.g. a separate static site served in the job and pointed at the preview).
+
+      - name: Run @watched against the preview
+        id: watched
+        env:
+          TARGET_URL: ${{ github.event.inputs.target_url || github.event.deployment_status.target_url }}
+          # Only set when deployment protection is ON; harmless if unset.
+          VERCEL_AUTOMATION_BYPASS_SECRET: ${{ secrets.VERCEL_AUTOMATION_BYPASS_SECRET }}
+          # AGENT: app env from APP-PROFILE.md.
+        run: npx playwright test --config playwright.launchguard.ts
+
+      - name: Upload report (video + traces)
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: launchguard-watched-report
+          path: |
+            playwright-report/
+            test-results/
+          retention-days: 14
+
+      # AGENT: post the LaunchGuard proof page (visual-correctness contract, with
+      # the user's consent) and a sticky PR comment. See INIT.md Step 5.
