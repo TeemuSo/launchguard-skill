@@ -1,0 +1,33 @@
+name: Task
+description: A unit of work (feature, improvement, chore, doc fix)
+labels: ["task"]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What
+      description: What needs to change, in one or two sentences.
+    validations:
+      required: true
+  - type: textarea
+    id: why
+    attributes:
+      label: Why
+      description: The problem or goal behind it. Link evidence if there is any.
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance criteria
+      description: Observable outcomes that mean "done". One per line.
+      placeholder: "- [ ] ..."
+    validations:
+      required: true
+  - type: textarea
+    id: proof
+    attributes:
+      label: Proof plan
+      description: How the change will be verified against the running app (for example a LaunchProof run). Write "docs-only" if there is no runtime surface.
+    validations:
+      required: false

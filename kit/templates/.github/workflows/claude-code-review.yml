@@ -1,0 +1,86 @@
+name: Claude Code Review
+
+# Automated code review that POSTS its findings on the PR as a comment.
+#
+# Auth: needs ONE of these repo secrets (checked in that order):
+#   CLAUDE_CODE_OAUTH_TOKEN   Pro/Max subscription token: run `claude setup-token`
+#                             locally, then `gh secret set CLAUDE_CODE_OAUTH_TOKEN`.
+#   ANTHROPIC_API_KEY         An Anthropic Console API key.
+# If neither secret is set, the job skips with a notice instead of failing,
+# so the kit can be installed before the secret exists.
+#
+# Posting: by default the action posts through the Claude GitHub App
+# (one-time install: https://github.com/apps/claude). If you cannot install
+# the app, add `github_token: ${{ secrets.GITHUB_TOKEN }}` to the action step;
+# this job already carries `pull-requests: write` so that fallback works.
+#
+# The prompt REQUIRES the agent to post one summary comment per run. A review
+# that only prints findings to the (hidden) action log is invisible; that was
+# a real, watched failure mode. Do not remove the posting instructions.
+
+on:
+  pull_request:
+    types: [opened, synchronize, ready_for_review, reopened]
+
+jobs:
+  claude-review:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+      issues: read
+      id-token: write
+    steps:
+      - name: Check for a review credential
+        id: token
+        env:
+          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          if [ -n "$CLAUDE_CODE_OAUTH_TOKEN" ] || [ -n "$ANTHROPIC_API_KEY" ]; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "present=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::No CLAUDE_CODE_OAUTH_TOKEN or ANTHROPIC_API_KEY secret is set; skipping automated review. Generate a token with 'claude setup-token', then add it with 'gh secret set CLAUDE_CODE_OAUTH_TOKEN'."
+          fi
+
+      - name: Checkout repository
+        if: steps.token.outputs.present == 'true'
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Run Claude Code Review
+        if: steps.token.outputs.present == 'true'
+        uses: anthropics/claude-code-action@v1
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          prompt: |
+            REPO: ${{ github.repository }}
+            PR NUMBER: ${{ github.event.pull_request.number }}
+
+            Review this pull request. The PR branch is already checked out in
+            the current working directory. Focus on:
+            - Bugs and logic errors in the changed code
+            - Security problems introduced by the change
+            - Clear violations of the repo's CLAUDE.md conventions, if present
+
+            Only flag real, high-confidence issues in the changed code itself.
+            No style nitpicks, no pre-existing issues, no speculation.
+
+            Then you MUST post the review where a human can see it:
+            1. Post exactly ONE summary comment using `gh pr comment` (Bash
+               tool). Start it with the heading "## Automated review", then
+               either the numbered list of issues found or the sentence
+               "No issues found." Even if an earlier automated review comment
+               exists, still post one for this run.
+            2. For each specific code issue, also add an inline comment with
+               `mcp__github_inline_comment__create_inline_comment` (pass
+               `confirmed: true`).
+
+            The review is INVISIBLE unless you post it. Never leave findings
+            only in your final message or the action log.
+
+          claude_args: |
+            --allowedTools "mcp__github_inline_comment__create_inline_comment,Bash(gh pr comment:*),Bash(gh pr diff:*),Bash(gh pr view:*),Bash(gh issue view:*)"

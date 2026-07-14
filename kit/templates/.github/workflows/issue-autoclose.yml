@@ -1,0 +1,48 @@
+name: Close linked issues on merge
+
+# GitHub's native "Closes #N" auto-close only fires for PRs merged into the
+# DEFAULT branch. Repos that do their day-to-day work on a non-default branch
+# (for example `dev`) lose that contract. This workflow restores it: when a PR
+# is MERGED into any NON-default branch, every issue referenced with a closing
+# keyword (close/closes/closed, fix/fixes/fixed, resolve/resolves/resolved) in
+# the PR body is closed with a comment linking back to the PR.
+# Merges into the default branch are left to GitHub's native behavior, so
+# issues are never double-commented.
+
+on:
+  pull_request:
+    types: [closed]
+
+permissions:
+  issues: write
+  pull-requests: read
+
+jobs:
+  close-linked-issues:
+    if: >-
+      github.event.pull_request.merged == true &&
+      github.event.pull_request.base.ref != github.event.repository.default_branch
+    runs-on: ubuntu-latest
+    steps:
+      - name: Close issues referenced by closing keywords in the PR body
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+          PR_URL: ${{ github.event.pull_request.html_url }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+          REPO: ${{ github.repository }}
+        run: |
+          issues=$(printf '%s\n' "$PR_BODY" \
+            | grep -oiE '(close[sd]?|fix(e[sd])?|resolve[sd]?):?[[:space:]]+#[0-9]+' \
+            | grep -oE '[0-9]+' | sort -un || true)
+          if [ -z "$issues" ]; then
+            echo "No closing keywords found in the PR body; nothing to close."
+            exit 0
+          fi
+          for issue in $issues; do
+            echo "Closing #$issue (linked from PR #$PR_NUMBER, merged into $BASE_REF)"
+            gh issue close "$issue" -R "$REPO" \
+              --comment "Closed by $PR_URL (merged into \`$BASE_REF\`)." \
+              || echo "::warning::Could not close #$issue (already closed, or not an issue in this repo)"
+          done
