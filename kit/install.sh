@@ -174,6 +174,5 @@ echo "       claude setup-token && gh secret set CLAUDE_CODE_OAUTH_TOKEN   # Pro
 echo "     or"
 echo "       gh secret set ANTHROPIC_API_KEY                               # Console key"
 echo "     Posting uses the Claude GitHub App (one-time: https://github.com/apps/claude)."
-echo "  4. Optional: LaunchProof. If this repo has LaunchProof tests, post run"
-echo "     verdicts into PRs with kit/post-proof.sh (see its header). If not, the"
-echo "     loop still works: state \"docs-only\" or your own proof in the PR body."
+echo "  4. Every PR states its proof: what you drove against the running app and"
+echo "     what you saw, or \"docs-only\" when there is no runtime surface."

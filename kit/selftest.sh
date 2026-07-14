@@ -4,8 +4,7 @@
 #
 #   seed app -> install kit -> (no-credential review skip) -> issue from form
 #   fields -> fix branch -> PR with "Closes #N" -> automated review COMMENT
-#   appears -> LaunchProof verdict comment -> merge -> issue AUTO-CLOSES
-#   -> default-branch no-op check
+#   appears -> merge -> issue AUTO-CLOSES -> default-branch no-op check
 #
 #   usage: bash kit/selftest.sh OWNER/REPO
 #
@@ -17,9 +16,6 @@
 #       If set (and the repo has no review secret yet), the script uploads it
 #       as a repo secret so the automated-review leg can be witnessed.
 #       If absent, the review legs are reported as SKIPPED, honestly.
-#   LAUNCHPROOF_HOME
-#       Path to a LaunchProof checkout. If usable, the proof leg runs a real
-#       browser test and posts the verdict into the PR. Otherwise SKIPPED.
 #   SELFTEST_PORT (default 4380)
 #
 # The script never fakes a leg: every PASS line is accompanied by a fetched
@@ -74,52 +70,18 @@ cat > index.html <<'HTML'
 </head>
 <body>
   <h1>Kit Dogfood</h1>
-  <p>Living evidence repo for the LaunchProof repo process kit
-     (issue -&gt; PR -&gt; review -&gt; proof -&gt; merge -&gt; auto-close).</p>
+  <p>Living evidence repo for the LaunchGuard repo process kit
+     (issue -&gt; PR -&gt; review -&gt; merge -&gt; auto-close).</p>
   <p>Deployment status: <span class="pill">status: BROKEN</span></p>
 </body>
 </html>
 HTML
-mkdir -p .launchproof/tests
-cat > .launchproof/tests/status-ok.spec.ts <<'SPEC'
-// Proves the dogfood page reports a healthy deployment status to the user.
-import { test, expect } from '@playwright/test';
-import { recordedStep } from './helpers/shot';
-
-test(
-  'the dogfood page loads and shows deployment status OK',
-  {
-    tag: '@functional',
-    annotation: {
-      type: 'meaning',
-      description:
-        'The Kit Dogfood page must load and visibly say "status: OK". Red means ' +
-        'the page is down or still tells users the deployment is broken.',
-    },
-  },
-  async ({ page }, testInfo) => {
-    await recordedStep(page, testInfo, 'reach the dogfood page', async () => {
-      const response = await page.goto('/');
-      expect(response?.status(), 'page HTTP status').toBeLessThan(400);
-      await expect(page.getByRole('heading', { name: 'Kit Dogfood' })).toBeVisible();
-    });
-
-    await recordedStep(page, testInfo, 'status pill says OK', async () => {
-      await expect(page.getByText('status: OK')).toBeVisible();
-    });
-  }
-);
-SPEC
 cat > .gitignore <<'GI'
-.launchproof/runs/
-.launchproof/auth/
-.launchproof/test-results/
 node_modules/
-.launchproof/node_modules
 GI
-printf '# %s\n\nSelf-test evidence repo for the LaunchProof repo process kit.\nServe: python3 -m http.server %s\n' "${REPO#*/}" "$PORT" > README.md
+printf '# %s\n\nSelf-test evidence repo for the LaunchGuard repo process kit.\nServe: python3 -m http.server %s\n' "${REPO#*/}" "$PORT" > README.md
 git add -A
-git commit -q -m "seed: dogfood page (status pill intentionally BROKEN) + LaunchProof spec"
+git commit -q -m "seed: dogfood page (status pill intentionally BROKEN)"
 git push -q -u origin main
 pass "seed pushed to main"
 
@@ -178,7 +140,7 @@ fi
 say "Leg 4: issue with the task form's fields"
 ISSUE_URL=$(gh issue create -R "$REPO" --label task \
   --title "Status pill shows BROKEN on a healthy deployment" \
-  --body "$(printf '### What\n\nMake the deployment status pill say "status: OK".\n\n### Why\n\nThe page tells every visitor the deployment is broken when it is healthy.\n\n### Acceptance criteria\n\n- [ ] The page shows "status: OK"\n- [ ] LaunchProof test status-ok is green\n\n### Proof plan\n\nLaunchProof run of status-ok against the served page; verdict posted into the PR.')")
+  --body "$(printf '### What\n\nMake the deployment status pill say "status: OK".\n\n### Why\n\nThe page tells every visitor the deployment is broken when it is healthy.\n\n### Acceptance criteria\n\n- [ ] The page shows "status: OK"\n\n### Proof plan\n\nServe the page and read the status pill.')")
 ISSUE_NUM="${ISSUE_URL##*/}"
 pass "issue #$ISSUE_NUM created: $ISSUE_URL"
 
@@ -190,7 +152,7 @@ git commit -qam "fix: status pill reports OK (was hardcoded BROKEN)"
 git push -q -u origin fix/status-pill-ok
 PR_URL=$(gh pr create -R "$REPO" --base dev --head fix/status-pill-ok \
   --title "fix: status pill reports OK" \
-  --body "$(printf '## What\n\nStatus pill said BROKEN on a healthy deployment; now says OK.\n\nCloses #%s\n\n## Proof\n\n- Verdict: posted below by kit/post-proof.sh (LaunchProof run)\n- Evidence: run directory referenced in the comment\n\n## Checklist\n\n- [x] Issue linked above with a closing keyword\n- [ ] Proof posted into this PR\n- [x] Newly learned quirks appended to the agent playbook (none)\n' "$ISSUE_NUM")")
+  --body "$(printf '## What\n\nStatus pill said BROKEN on a healthy deployment; now says OK.\n\nCloses #%s\n\n## Proof\n\n- Verdict: the served page shows "status: OK"\n- Evidence: seeded page diff in this PR\n\n## Checklist\n\n- [x] Issue linked above with a closing keyword\n- [x] Proof stated in this PR\n- [x] Newly learned quirks appended to the agent playbook (none)\n' "$ISSUE_NUM")")
 PR_NUM="${PR_URL##*/}"
 pass "PR #$PR_NUM opened: $PR_URL"
 
@@ -221,36 +183,8 @@ else
   skip "review-comment leg (no credential)"
 fi
 
-# ---------- leg 7: LaunchProof verdict posted into the PR ----------
-say "Leg 7: LaunchProof proof comment"
-LP_HOME="${LAUNCHPROOF_HOME:-$(cd "$KIT_DIR/.." && pwd)}"
-if [ -f "$LP_HOME/run.mjs" ] && command -v node >/dev/null 2>&1 && command -v python3 >/dev/null 2>&1; then
-  (cd "$WORK/repo" && python3 -m http.server "$PORT" >/dev/null 2>&1 &)
-  sleep 1
-  set +e
-  (cd "$WORK/repo" && LAUNCHPROOF_DIR="$WORK/repo/.launchproof" TARGET_URL="http://localhost:$PORT" node "$LP_HOME/run.mjs" status-ok)
-  LP_EXIT=$?
-  set -e
-  pkill -f "http.server $PORT" 2>/dev/null || true
-  LAST_RUN=$(ls -1dt "$WORK/repo/.launchproof/runs/"* 2>/dev/null | head -1 || true)
-  if [ -n "$LAST_RUN" ] && [ -f "$LAST_RUN/result.json" ]; then
-    (cd "$WORK/repo" && bash "$KIT_DIR/post-proof.sh" "$PR_NUM" "$LAST_RUN" --repo "$REPO")
-    PROOF_COMMENT=$(gh pr view "$PR_NUM" -R "$REPO" --json comments --jq '[.comments[] | select(.body | contains("LaunchProof:"))][0].url' 2>/dev/null || true)
-    if [ -n "$PROOF_COMMENT" ] && [ "$PROOF_COMMENT" != "null" ]; then
-      pass "LaunchProof verdict comment is VISIBLE on the PR: $PROOF_COMMENT"
-    else
-      fail "post-proof.sh ran but no LaunchProof comment found on PR #$PR_NUM"
-    fi
-    [ "$LP_EXIT" -ne 0 ] && fail "LaunchProof verdict was not green (exit $LP_EXIT); the fix branch should pass"
-  else
-    fail "LaunchProof produced no run directory"
-  fi
-else
-  skip "LaunchProof leg (no usable LAUNCHPROOF_HOME with run.mjs, or node/python3 missing)"
-fi
-
-# ---------- leg 8: merge -> issue auto-closes (non-default branch) ----------
-say "Leg 8: merge PR #$PR_NUM into dev -> issue #$ISSUE_NUM auto-closes"
+# ---------- leg 7: merge -> issue auto-closes (non-default branch) ----------
+say "Leg 7: merge PR #$PR_NUM into dev -> issue #$ISSUE_NUM auto-closes"
 gh pr merge "$PR_NUM" -R "$REPO" --merge --delete-branch >/dev/null
 echo "merged; waiting for issue-autoclose..."
 i=0; STATE="OPEN"
@@ -268,8 +202,8 @@ else
   fail "issue #$ISSUE_NUM is still $STATE after merge into dev (issue-autoclose did not fire)"
 fi
 
-# ---------- leg 9: default-branch merges are left to GitHub (no double-fire) ----------
-say "Leg 9: default-branch no-op (native close, autoclose job skips)"
+# ---------- leg 8: default-branch merges are left to GitHub (no double-fire) ----------
+say "Leg 8: default-branch no-op (native close, autoclose job skips)"
 NATIVE_ISSUE_URL=$(gh issue create -R "$REPO" --label task --title "README: note the default-branch check" \
   --body "$(printf '### What\n\nAdd one line to the README.\n\n### Why\n\nWitnesses native Closes-on-default-branch plus the autoclose no-op guard.\n\n### Acceptance criteria\n\n- [ ] README has the line\n\n### Proof plan\n\ndocs-only')")
 NATIVE_ISSUE="${NATIVE_ISSUE_URL##*/}"
@@ -306,7 +240,7 @@ fi
 # ---------- summary ----------
 say "Summary"
 echo "repo:    https://github.com/$REPO"
-echo "workdir: $WORK (kept; LaunchProof artifacts live under repo/.launchproof/runs)"
+echo "workdir: $WORK (kept)"
 if [ "$FAILURES" -eq 0 ]; then
   echo "All executed legs PASSED. Legs marked SKIP were not witnessed; provide the missing credential/harness and re-run on a fresh repo to witness them."
 else

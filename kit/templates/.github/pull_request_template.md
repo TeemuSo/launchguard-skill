@@ -6,9 +6,8 @@ Closes #
 
 ## Proof
 
-<!-- Verdict for THIS branch, from a real run against the running app.
-     Post it as a PR comment with:
-       bash "$LAUNCHPROOF_HOME/kit/post-proof.sh" <pr-number> <path-to-run-dir>
+<!-- Verdict for THIS branch, from a real run against the running app: what you
+     drove, and what you saw. A code trace or a green build is not a verdict.
      For changes with no runtime surface, write "docs-only" below. -->
 
 - Verdict:
@@ -17,5 +16,5 @@ Closes #
 ## Checklist
 
 - [ ] Issue linked above with a closing keyword (Closes / Fixes / Resolves #N)
-- [ ] Proof posted into this PR (LaunchProof verdict comment), or "docs-only" stated
+- [ ] Proof stated above from a real run, or "docs-only"
 - [ ] Newly learned quirks appended to the agent playbook

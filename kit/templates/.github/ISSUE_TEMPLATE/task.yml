@@ -28,6 +28,6 @@ body:
     id: proof
     attributes:
       label: Proof plan
-      description: How the change will be verified against the running app (for example a LaunchProof run). Write "docs-only" if there is no runtime surface.
+      description: How the change will be verified against the running app: what will be driven, and what would prove it worked. Write "docs-only" if there is no runtime surface.
     validations:
       required: false

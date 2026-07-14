@@ -21,15 +21,14 @@ gh secret set ANTHROPIC_API_KEY                               # or a Console API
 ```
 
 The review posts through the Claude GitHub App. Install it once for your
-account or the repo: https://github.com/apps/claude. No LaunchProof setup is
-required; without it, state your proof (or "docs-only") in the PR body.
+account or the repo: https://github.com/apps/claude.
 
 ## The loop (one agent per issue)
 
 1. Open an issue from the `task` or `bug` form (acceptance criteria + proof plan baked in).
 2. One agent takes the issue: branch, build, open a PR with `Closes #N` in the body.
 3. The automated review posts a "## Automated review" comment on the PR by itself.
-4. Post the proof into the PR: `bash "$LAUNCHPROOF_HOME/kit/post-proof.sh" <pr-number> .launchproof/runs/<run-id>` (add `--proof-url` if a hosted proof page exists).
+4. State the proof in the PR body: what you drove against the running app, and what you saw.
 5. Merge. The linked issue closes, on any branch.
 
 ## What each piece does
@@ -41,8 +40,7 @@ required; without it, state your proof (or "docs-only") in the PR body.
 | `.github/workflows/claude-code-review.yml` | Automated review on every PR. ALWAYS posts one "## Automated review" summary comment (plus inline comments on specific issues). Skips with a notice when no credential secret is set. |
 | `.github/workflows/issue-autoclose.yml` | GitHub only honors `Closes #N` for merges into the DEFAULT branch. This restores it for merges into any other branch (for example `dev`), and stays silent on default-branch merges so nothing double-fires. |
 | `launchguard-reporter.mjs` | Sends every test's verdict to your LaunchGuard dashboard at the end of a CI run you already pay for: no new job, no extra browser launch. Copied next to each `playwright.config` found. Plain ESM, no dependencies, no build, **no npm install**: Playwright loads a reporter by file path. Add it to the config's `reporter` list and set `LAUNCHGUARD_API_KEY`; without the key it prints a notice and no-ops. It sends test identity, verdict, and a sanitized message, never your test source. |
-| `kit/post-proof.sh` | Posts a LaunchProof run's verdict (WORKING / BROKEN / INCONCLUSIVE), per-step table, and evidence location into a PR as a comment, from the run's `result.json`. |
-| `kit/selftest.sh` | End-to-end self-test: point it at a fresh empty repo (`gh repo create x --private`, then `bash kit/selftest.sh OWNER/x`) and it drives the whole loop above, printing the real evidence for every leg (comment URLs and bodies, issue close events, run conclusions). Legs it cannot witness (no credential, no LaunchProof) are reported SKIP, never faked. |
+| `kit/selftest.sh` | End-to-end self-test: point it at a fresh empty repo (`gh repo create x --private`, then `bash kit/selftest.sh OWNER/x`) and it drives the whole loop above, printing the real evidence for every leg (comment URLs and bodies, issue close events, run conclusions). Legs it cannot witness (no credential) are reported SKIP, never faked. |
 
 ## Installer behavior
 
@@ -80,7 +78,8 @@ matching error text, which drifts with every Playwright release.
 - Repo-specific tuning happens in the TARGET repo after install (the installer
   never overwrites), not by editing the kit for one consumer.
 - External requirements: `gh` (authenticated). For automated review: one of
-  the two secrets above plus the Claude GitHub App. LaunchProof is optional.
+  the two secrets above plus the Claude GitHub App. For the reporter:
+  `LAUNCHGUARD_API_KEY`. Each one missing is a printed notice, never a failure.
 
 ## Known limits (honest by design)
 
@@ -92,9 +91,10 @@ matching error text, which drifts with every Playwright release.
   `issue-autoclose.yml` (a `closed`-type trigger) must already be on the BASE
   branch when the merge happens; land the kit first, then the loop is complete
   for every following PR.
-- LaunchProof run directories are local and gitignored, so the proof comment
-  records the verdict, step table, run id, and machine path. A public link
-  requires `--proof-url` (for example a hosted proof page).
+- The reporter needs to know which APP a run belongs to, and a per-PR preview
+  URL cannot tell it: every PR would mint a new app. Set `app` in the reporter
+  options (or `LAUNCHGUARD_APP`) to your real domain, or it prints a notice and
+  reports nothing.
 - The review agent posts as `claude[bot]` via the Claude GitHub App. If you
   cannot install the app, add `github_token: ${{ secrets.GITHUB_TOKEN }}` to
   the review step; comments then post as `github-actions[bot]`.
